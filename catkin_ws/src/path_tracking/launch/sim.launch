@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<!--
+  planning 개발 스택 한 번에 실행.
+  ※ 먼저 다른 터미널에서 브릿지(udp)를 켜둘 것 (roscore + /ego_status + /ctrl_cmd).
+  실행:  roslaunch path_tracking sim.launch
+-->
+<launch>
+  <!-- 차량 시각화 (차 박스 + TF) -->
+  <node pkg="udp_bridge" type="ego_viz.py" name="ego_viz" output="screen"/>
+
+  <!-- 경로 추종 (path_smooth.csv -> /ctrl_cmd) -->
+  <node pkg="path_tracking" type="path_tracker.py" name="path_tracker" output="screen"/>
+
+  <!-- 가짜 장애물 (perception 준비되면 이 줄만 지우면 됨) -->
+  <node pkg="path_tracking" type="mock_obstacle_pub" name="mock_obstacle_pub" output="screen"/>
+
+  <!-- 장애물 시각화 (실제 perception 와도 계속 사용) -->
+  <node pkg="path_tracking" type="object_viz" name="object_viz" output="screen"/>
+
+  <!-- lattice 회피 경로 생성 -->
+  <node pkg="path_tracking" type="lattice_planner" name="lattice_planner" output="screen"/>
+
+  <!-- RViz -->
+  <node pkg="rviz" type="rviz" name="rviz" args="-d $(find udp_bridge)/rviz/ego.rviz"/>
+</launch>

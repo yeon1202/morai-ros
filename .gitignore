@@ -1,0 +1,25 @@
+# --- catkin 빌드 산출물 ---
+catkin_ws/build/
+catkin_ws/devel/
+catkin_ws/logs/
+catkin_ws/.catkin_tools/
+
+# --- 시뮬레이터 바이너리 ---
+morai_sim/
+
+# --- 벤더/레퍼런스 (자체 .git 보유, 우리 코드 아님) ---
+MORAI-RoboticsExample/
+catkin_ws/src/morai_msgs/
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+
+# --- 에디터/OS ---
+.vscode/
+*.swp
+.DS_Store
+
+# --- SDD 진행 원장(scratch) ---
+# .superpowers/ 는 추적 (진행 원장 복구용) — 필요시 조정
