@@ -14,6 +14,7 @@ find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
   visualization_msgs
   nav_msgs
+  std_msgs
 )
 
 ## System dependencies are found with CMake's conventions
@@ -222,3 +223,16 @@ target_link_libraries(object_viz ${catkin_LIBRARIES})
 add_executable(lattice_planner src/lattice_planner.cpp)
 add_dependencies(lattice_planner ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 target_link_libraries(lattice_planner ${catkin_LIBRARIES})
+
+# ================= ACC 추가 =================
+include_directories(include ${catkin_INCLUDE_DIRS})
+
+## gtest: ACC 순수 로직 단위 테스트
+catkin_add_gtest(acc_core_test test/acc_core_test.cpp)
+if(TARGET acc_core_test)
+  # catkin_add_gtest는 core gtest lib만 링크하고 gtest_main(=main())은
+  # 제외한다 (이 catkin 버전 기준). 테스트 파일에 main()을 직접 두지
+  # 않으므로 gtest_main을 명시적으로 링크해 "undefined reference to
+  # main" 링커 에러를 방지한다.
+  target_link_libraries(acc_core_test ${catkin_LIBRARIES} gtest_main)
+endif()
