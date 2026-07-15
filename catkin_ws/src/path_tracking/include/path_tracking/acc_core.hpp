@@ -35,6 +35,34 @@ inline double speedKmhToMps(double vx_kmh, double vy_kmh) {
   return std::hypot(vx_kmh, vy_kmh) / 3.6;
 }
 
+// 기준경로 위의 전방 객체 중 ego에 가장 가까운 것을 lead로 선택.
+// path 위 판정 = 어떤 path 점과의 횡거리 < distance_threshold.
+// distance = ego 상대거리 − vehicle_length.
+inline Lead selectLead(const std::vector<Vec2>& path, const Vec2& ego,
+                       const std::vector<ObjIn>& objs, const AccParams& p) {
+  Lead lead;
+  double min_rel = std::numeric_limits<double>::infinity();
+
+  for (const auto& o : objs) {
+    // 경로 위인지: 최근접 path 점까지 거리
+    double min_to_path = std::numeric_limits<double>::infinity();
+    for (const auto& pt : path) {
+      double d = std::hypot(pt.x - o.pos.x, pt.y - o.pos.y);
+      if (d < min_to_path) min_to_path = d;
+    }
+    if (min_to_path >= p.distance_threshold) continue;  // 경로 밖
+
+    double rel = std::hypot(o.pos.x - ego.x, o.pos.y - ego.y);
+    if (rel < min_rel) {
+      min_rel = rel;
+      lead.present  = true;
+      lead.distance = rel - p.vehicle_length;
+      lead.velocity = o.speed_mps;
+    }
+  }
+  return lead;
+}
+
 // 목표속도 계산 (레퍼런스 SSAFY식).
 inline double computeTargetVelocity(double ego_vel, const Lead& lead, const AccParams& p) {
   double out_vel = p.cruise_speed;
