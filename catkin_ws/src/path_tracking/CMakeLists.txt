@@ -236,3 +236,7 @@ if(TARGET acc_core_test)
   # main" 링커 에러를 방지한다.
   target_link_libraries(acc_core_test ${catkin_LIBRARIES} gtest_main)
 endif()
+
+add_executable(acc_planner src/acc_planner.cpp)
+add_dependencies(acc_planner ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+target_link_libraries(acc_planner ${catkin_LIBRARIES})
