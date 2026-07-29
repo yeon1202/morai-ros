@@ -33,6 +33,13 @@
   <arg name="cruise_speed_kmh" default="55.0"/>
   <arg name="lookahead"        default="60.0"/>  <!-- ACC 전방 탐색 [m] -->
 
+  <!-- 목표속도 상승률 한계 [m/s^2]. 커브를 빠져나오는 순간 곡률 제한이 즉시 풀려
+       목표속도가 한 스텝에 크루즈까지 열리는데, 그 급상승이 복귀 조향을 흔들어
+       S자 사행을 만든다. 유턴 탈출 실측 가속도가 2.4 m/s^2 였으므로 그 이상으로
+       잡으면 효과가 없다. 낮출수록 사행은 줄지만 완주 시간이 늘어난다
+       (1.0 이면 커브당 약 +6.5초, 0.5 면 +17.6초). -->
+  <arg name="accel_rate_limit" default="1.0"/>
+
   <!-- 차량 시각화 (차 박스 + 지나온 궤적) -->
   <node pkg="udp_bridge" type="ego_viz.py" name="ego_viz" output="screen"/>
 
@@ -51,6 +58,7 @@
   <node pkg="path_tracking" type="acc_planner" name="acc_planner" output="screen">
     <param name="cruise_speed_kmh" value="$(arg cruise_speed_kmh)"/>
     <param name="lookahead"        value="$(arg lookahead)"/>
+    <param name="accel_rate_limit" value="$(arg accel_rate_limit)"/>
   </node>
 
   <!-- 경로 추종 (이게 /local_path 를 발행하므로 ACC 가 앞차를 '경로 위'로 판정할 수 있다) -->

@@ -16,6 +16,13 @@
 #include <morai_msgs/ObjectStatus.h>
 #include "path_tracking/acc_core.hpp"
 
+// 타이머 주기. run() 에서 첫 틱의 dt 로도 쓰므로 상수로 둔다.
+// 클래스 멤버가 아니라 파일 스코프에 두는 이유: 이 패키지는 C++ 표준을 명시하지
+// 않아 컴파일러 기본값(gnu++14)을 쓰는데, C++14 에서는 클래스 안의 static
+// constexpr 멤버가 ODR-use 되면 클래스 밖 정의가 따로 필요해 undefined reference
+// 가 날 수 있다. 파일 스코프 상수는 그 문제가 없다.
+static constexpr double kTimerHz = 30.0;
+
 class AccPlanner
 {
 public:
@@ -34,6 +41,9 @@ public:
     pnh.param("brake_accel",        params_.brake_accel,        params_.brake_accel);
     pnh.param("curve_baseline",     params_.curve_baseline,     params_.curve_baseline);
     pnh.param("curve_min_speed",    params_.curve_min_speed,    params_.curve_min_speed);
+    pnh.param("accel_rate_limit",   params_.accel_rate_limit,   params_.accel_rate_limit);
+    pnh.param("rate_limit_windup",  params_.rate_limit_windup,  params_.rate_limit_windup);
+    pnh.param("rate_dt_max",        params_.rate_dt_max,        params_.rate_dt_max);
     pnh.param("velocity_gain",      params_.velocity_gain,      params_.velocity_gain);
     pnh.param("distance_gain",      params_.distance_gain,      params_.distance_gain);
     pnh.param("cruise_speed_kmh",   cruise_kmh,                 cruise_kmh);
@@ -46,8 +56,11 @@ public:
     sub_ego_     = nh.subscribe("/ego_status",   1, &AccPlanner::egoCb,     this);
     sub_obj_     = nh.subscribe("/Object_topic", 1, &AccPlanner::objCb,     this);
     pub_vel_     = nh.advertise<std_msgs::Float64>("/target_velocity", 1);
-    timer_       = nh.createTimer(ros::Duration(1.0 / 30.0), &AccPlanner::run, this);
-    ROS_INFO("[acc_planner] started (cruise=%.1f km/h, cap=%.1f km/h)", cruise_kmh, max_kmh);
+    timer_       = nh.createTimer(ros::Duration(1.0 / kTimerHz), &AccPlanner::run, this);
+    // ROS_INFO 포맷 문자열에는 한글을 쓰지 않는다. 컨테이너 로케일이 UTF-8 이
+    // 아니라 로그 출력에서 '?' 로 깨진다(주석의 한글은 컴파일러가 처리하므로 무관).
+    ROS_INFO("[acc_planner] started (cruise=%.1f km/h, cap=%.1f km/h, rate_limit=%.2f m/s^2)",
+             cruise_kmh, max_kmh, params_.accel_rate_limit);
   }
 
 private:
@@ -61,6 +74,10 @@ private:
   morai_msgs::ObjectStatusList objs_;
   ros::Time lattice_stamp_;
   bool has_local_ = false, has_ego_ = false, has_obj_ = false;
+
+  // 목표속도 상승률 제한용 상태. prev_time_ 이 zero 면 아직 첫 틱을 안 돈 것이다.
+  double    prev_target_ = 0.0;
+  ros::Time prev_time_;
 
   void localCb(const nav_msgs::Path::ConstPtr& m)   { local_path_ = *m; has_local_ = true; }
   void egoCb(const morai_msgs::EgoVehicleStatus::ConstPtr& m) { ego_ = *m; has_ego_ = true; }
@@ -121,10 +138,28 @@ private:
     // 크루즈·앞차추종·곡률(나중엔 behavior 까지)을 여기서 모두 합쳐 최종값 하나로 낸다.
     double curve_limit = acc::curvatureSpeedLimit(path, params_);
     if (curve_limit < target) {
-      ROS_INFO_THROTTLE(2.0, "[acc] 곡률 제한 적용: %.2f -> %.2f m/s (%.1f km/h)",
+      ROS_INFO_THROTTLE(2.0, "[acc] curve limit: %.2f -> %.2f m/s (%.1f km/h)",
                         target, curve_limit, curve_limit * 3.6);
       target = curve_limit;
     }
+
+    // 목표속도 상승률 제한. 크루즈·앞차추종·곡률을 모두 합산한 뒤 마지막에 한 번
+    // 적용한다. 목표가 어떤 이유로 오르든 동일하게 제한하기 위해서다.
+    ros::Time now = ros::Time::now();
+    double dt = prev_time_.isZero() ? (1.0 / kTimerHz) : (now - prev_time_).toSec();
+    if (prev_time_.isZero() || dt > params_.rate_dt_max) {
+      // 첫 틱이거나 오래 끊겼다. 달리는 차에 낡은 목표(또는 0)를 명령하면
+      // 급제동이 걸리므로 현재 속도로 시드한다.
+      prev_target_ = ego_vel;
+    }
+    double ramped = acc::rampTarget(prev_target_, target, ego_vel, dt, params_);
+    if (ramped < target) {
+      ROS_INFO_THROTTLE(2.0, "[acc] rate limit: %.2f -> %.2f m/s (%.1f km/h)",
+                        target, ramped, ramped * 3.6);
+    }
+    target       = ramped;
+    prev_target_ = target;
+    prev_time_   = now;
 
     std_msgs::Float64 msg;
     msg.data = target;
