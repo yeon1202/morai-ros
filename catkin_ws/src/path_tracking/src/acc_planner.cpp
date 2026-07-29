@@ -31,7 +31,15 @@ public:
     ros::NodeHandle nh;
     ros::NodeHandle pnh("~");
     // 파라미터 (기본값은 acc::AccParams). cruise/max는 km/h로 받아 내부 m/s 변환.
-    double cruise_kmh = 60.0, max_kmh = 60.0;
+    //
+    // 크루즈는 55 로 고정한다. 규정 상한은 60 이지만 target 60 으로 달렸을 때
+    // 실측이 60.1~60.2 km/h 로 넘어갔다. 규정상 60 초과는 15초 + 3초당 15초
+    // 패널티라 오버슈트 여유를 둔다. max(하드캡)는 규정값 그대로 60 이다.
+    //
+    // acc.launch 의 cruise_speed_kmh 기본값과 반드시 같아야 한다. 예전에는 여기가
+    // 60, launch 가 55 여서 rosrun 으로 띄우면 60, roslaunch 로 띄우면 55 로
+    // 조용히 달라졌다. 기준값 비교 주행에서 조건이 어긋나는 원인이 된다.
+    double cruise_kmh = 55.0, max_kmh = 60.0;
     pnh.param("time_gap",           params_.time_gap,           params_.time_gap);
     pnh.param("default_space",      params_.default_space,      params_.default_space);
     pnh.param("vehicle_length",     params_.vehicle_length,     params_.vehicle_length);

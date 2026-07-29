@@ -6,7 +6,7 @@
 번호는 단계별로 10 단위씩 끊었다. 나중에 문서가 중간에 끼어들어도 전체를 다시
 번호 매기지 않기 위해서다.
 
-## 0x — 배경과 제약 (개발 전에 정한 것)
+## 0x — 배경·제약·운영
 
 | 문서 | 내용 |
 |---|---|
@@ -14,6 +14,7 @@
 | [01-competition_rules.md](01-competition_rules.md) | 대회 규정 요약(planning 관점). 60km/h 상한, 허용 네트워크, 미션 목록, 차량 제원 |
 | [02-planning_algorithms.md](02-planning_algorithms.md) | 알고리즘 서베이. lattice / FOT / MPCC 비교와 선택 근거 |
 | [03-fot_theory.md](03-fot_theory.md) | Frenet Optimal Trajectory 이론. 현재는 stretch goal이지만 (s,d) 사고방식의 출처 |
+| **[04-runbook.md](04-runbook.md)** | **실행·정지 명령어와 자주 걸리는 함정.** 매일 여는 문서 |
 
 ## 1x — 로드맵
 
