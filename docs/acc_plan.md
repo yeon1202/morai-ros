@@ -587,107 +587,55 @@ git commit -m "feat(acc): acc_planner ROS 노드 + /target_velocity 발행"
 
 ---
 
-## Task 4: mock_lead_vehicle.cpp — 오프라인 검증용 느린 앞차
+## Task 4: mock_lead_vehicle.cpp — 오프라인 검증용 느린 앞차 (옵션 B: 경로 추종)
+
+**설계 결정 (2026-07):** 앞차 이동 모델을 **직선(+x)이 아니라 경로 추종(옵션 B)** 으로 확정.
+이유: 우리 대회 경로(`path_smooth.csv`)는 굽은 winding 코스라, 직선으로 가는 앞차는 몇 초 뒤 경로에서
+2.5m 넘게 벗어나고 `acc_core::selectLead`(경로 위 판정 = 최근접 path 점 횡거리 < `distance_threshold`)가
+앞차를 놓쳐 테스트가 무의미해진다. 경로 위를 호길이만큼 전진시키면 앞차가 항상 경로 위에 있어 ACC의
+감속-추종을 끝까지 관찰할 수 있고, 실제 대회 NPC(차선 주행)와도 가장 가깝다.
+
+**두 층(layer) 구분 — mock은 버려지지 않음:**
+- **Layer 1 (지금, 시뮬 없이):** `mock_lead_vehicle` → `/Object_topic` → ACC. **ACC 로직** 검증.
+- **Layer 2 (나중, 시뮬):** MORAI 실제 NPC → perception → `/Object_topic` → ACC. **전체 파이프라인·타이밍·단위** 검증.
+- 두 층이 **같은 `/Object_topic` 인터페이스**를 공유 → 시뮬 갈 때 mock만 끄면 됨. (아래 Task 7 참고)
 
 **Files:**
 - Create: `catkin_ws/src/path_tracking/src/mock_lead_vehicle.cpp`
-- Modify: `catkin_ws/src/path_tracking/CMakeLists.txt`
-- Modify: `catkin_ws/src/path_tracking/launch/sim.launch`
+- Modify: `catkin_ws/src/path_tracking/CMakeLists.txt` (실행타깃 + `roslib` 컴포넌트 — `ros/package.h`용)
+- Modify: `catkin_ws/src/path_tracking/launch/sim.launch` (나중 통합 때)
 
 **Interfaces:**
-- Produces: ROS 노드 `mock_lead_vehicle`, 토픽 `/Object_topic`에 움직이는 NPC 1대 발행. (mock_obstacle_pub과 택일 사용 — 동시 실행 금지)
+- Produces: ROS 노드 `mock_lead_vehicle`, 토픽 `/Object_topic`(`morai_msgs/ObjectStatusList`)에 움직이는 NPC 1대 발행.
+  (`mock_obstacle_pub`과 **동시 실행 금지** — 둘 다 `/Object_topic` 발행. 택일.)
 
-- [ ] **Step 1: mock_lead_vehicle.cpp 작성**
+**동작 흐름:**
+1. 시작 시 `path_smooth.csv`(x,y,z 헤더, ~3766점) 1회 로드 → `(x,y)` 벡터 + **누적 호길이** `s[i]` (인접점 거리 누적).
+2. 매 틱(20Hz): 앞차의 경로상 위치 `s = start_gap + v·t` (`v = lead_speed_kmh/3.6` [m/s]).
+3. `s`가 속한 세그먼트를 **선형보간** → `(x,y)`. 세그먼트 방향 = `heading(yaw)`.
+4. `s`가 경로 끝을 넘으면 **마지막 점에 정지(clamp)** (테스트 중엔 무해).
+5. `ObjectStatus` NPC로 채워 발행.
 
-Create `catkin_ws/src/path_tracking/src/mock_lead_vehicle.cpp`:
+**필드 규약:** `type=1`(NPC), `unique_id=10`, `position`=보간 경로점(ENU),
+`velocity`=`speed_kmh·(cos yaw, sin yaw)` [km/h, 접선방향 → heading과 일치. acc는 크기만 쓰지만 lattice 예측 재사용 대비],
+`size`=1.9×4.6×1.5(Ioniq5), `heading`=yaw[deg]. `frame_id="map"`.
 
-```cpp
-// mock_lead_vehicle : ACC 검증용, ego 앞을 느리게 가는 NPC 1대를 발행하는 개발 노드.
-// 발행: /Object_topic (morai_msgs/ObjectStatusList)
-// NPC는 ego 진행방향(+x) 앞 START_GAP 지점에서 시작, LEAD_SPEED_KMH로 +x 이동.
-// ego가 더 빠르면 접근 → ACC가 감속/추종하는지 확인.
-#include <ros/ros.h>
-#include <morai_msgs/ObjectStatusList.h>
-#include <morai_msgs/ObjectStatus.h>
+**Params (`~private`):** `start_gap`(기본 30m), `lead_speed_kmh`(기본 18 — 60캡보다 느려 감속 유발),
+`path_file`(기본 = `ros::package::getPath("path_tracking")+"/path/path_smooth.csv"`).
 
-int main(int argc, char** argv)
-{
-  ros::init(argc, argv, "mock_lead_vehicle");
-  ros::NodeHandle nh;
-  ros::NodeHandle pnh("~");
+- [ ] **Step 1:** `mock_lead_vehicle.cpp` 작성 — csv 로드 + 호길이 누적 → 메인루프(보간·발행). (초보 학습: 한 조각씩 같이 작성)
+- [ ] **Step 2:** `CMakeLists.txt` — `find_package` COMPONENTS에 `roslib` 추가 + 실행타깃 3줄:
+  ```cmake
+  add_executable(mock_lead_vehicle src/mock_lead_vehicle.cpp)
+  add_dependencies(mock_lead_vehicle ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+  target_link_libraries(mock_lead_vehicle ${catkin_LIBRARIES})
+  ```
+- [ ] **Step 3:** 빌드 — `cd ~/morai-ros/catkin_ws && catkin_make`, `devel/lib/path_tracking/mock_lead_vehicle` 생성 확인.
+- [ ] **Step 4:** 동작 확인 — `mock_lead_vehicle` 실행 후 `rostopic echo /Object_topic`으로 NPC position이 경로 따라 이동하는지, `rviz`(object_viz 마커)로 눈으로 확인.
+- [ ] **Step 5:** 커밋 — `git add src/mock_lead_vehicle.cpp CMakeLists.txt` → `feat(acc): mock_lead_vehicle 경로추종 앞차 발행 노드`.
 
-  double start_gap = 30.0, lead_speed_kmh = 18.0, start_x = 0.0, start_y = 0.0;
-  pnh.param("start_gap",      start_gap,      start_gap);       // ego 앞 초기 거리 [m]
-  pnh.param("lead_speed_kmh", lead_speed_kmh, lead_speed_kmh);  // 앞차 속도 [km/h]
-  pnh.param("start_x",        start_x,        start_x);         // ego 시작 x (경로 시작점)
-  pnh.param("start_y",        start_y,        start_y);
-
-  ros::Publisher pub = nh.advertise<morai_msgs::ObjectStatusList>("/Object_topic", 1);
-  ros::Rate rate(20);
-  double x = start_x + start_gap;
-  double v_mps = lead_speed_kmh / 3.6;
-  ros::Time t0 = ros::Time::now();
-
-  ROS_INFO("[mock_lead_vehicle] 느린 앞차 발행 (gap=%.1fm, %.1f km/h)", start_gap, lead_speed_kmh);
-
-  while (ros::ok())
-  {
-    double dt = (ros::Time::now() - t0).toSec();
-    x = start_x + start_gap + v_mps * dt;  // +x로 이동
-
-    morai_msgs::ObjectStatusList msg;
-    msg.header.stamp = ros::Time::now();
-    msg.header.frame_id = "map";
-
-    morai_msgs::ObjectStatus npc;
-    npc.unique_id = 10;
-    npc.type = 1;                     // NPC
-    npc.name = "mock_lead";
-    npc.position.x = x;
-    npc.position.y = start_y;
-    npc.position.z = 0.0;
-    npc.velocity.x = lead_speed_kmh;  // [km/h] (단위 주의)
-    npc.velocity.y = 0.0;
-    npc.size.x = 1.9; npc.size.y = 4.6; npc.size.z = 1.5;
-    npc.heading = 0.0;
-
-    msg.npc_list.push_back(npc);
-    msg.num_of_npcs = 1;
-    msg.num_of_pedestrian = 0;
-    msg.num_of_obstacle = 0;
-
-    pub.publish(msg);
-    rate.sleep();
-  }
-  return 0;
-}
-```
-
-- [ ] **Step 2: CMakeLists에 실행타깃 추가**
-
-`CMakeLists.txt` ACC 블록에 추가:
-
-```cmake
-add_executable(mock_lead_vehicle src/mock_lead_vehicle.cpp)
-add_dependencies(mock_lead_vehicle ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
-target_link_libraries(mock_lead_vehicle ${catkin_LIBRARIES})
-```
-
-- [ ] **Step 3: 빌드 확인**
-
-Run:
-```bash
-cd ~/morai-ros/catkin_ws && catkin_make
-```
-Expected: 빌드 성공, `devel/lib/path_tracking/mock_lead_vehicle` 생성.
-
-- [ ] **Step 4: 커밋**
-
-```bash
-cd ~/morai-ros
-git add catkin_ws/src/path_tracking/src/mock_lead_vehicle.cpp catkin_ws/src/path_tracking/CMakeLists.txt
-git commit -m "feat(acc): mock_lead_vehicle 검증용 앞차 발행 노드"
-```
+**Layer 2 (시뮬 시나리오) — 나중 확정:** MORAI Scenario 에디터로 ego 앞 차선에 NPC 배치 + 목표속도 ~18km/h
+지정(옵션 A 유력). 정확한 에디터 절차는 시뮬 붙일 때 MORAI 공식 시나리오 문서로 확인. (대안: 기록-재생 ghost / 네트워크 NPC 제어)
 
 ---
 

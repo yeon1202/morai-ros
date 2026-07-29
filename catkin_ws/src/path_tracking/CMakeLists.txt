@@ -10,6 +10,7 @@ project(path_tracking)
 find_package(catkin REQUIRED COMPONENTS
   roscpp
   rospy
+  roslib
   morai_msgs
   geometry_msgs
   visualization_msgs
@@ -240,3 +241,7 @@ endif()
 add_executable(acc_planner src/acc_planner.cpp)
 add_dependencies(acc_planner ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 target_link_libraries(acc_planner ${catkin_LIBRARIES})
+
+add_executable(mock_lead_vehicle src/mock_lead_vehicle.cpp)
+add_dependencies(mock_lead_vehicle ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+target_link_libraries(mock_lead_vehicle ${catkin_LIBRARIES})

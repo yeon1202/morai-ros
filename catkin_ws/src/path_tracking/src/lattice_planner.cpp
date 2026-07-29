@@ -58,7 +58,7 @@ private:
   // 장애물 하나 = 위치 + 반경(size 반영)
   struct Obs { double x, y, r; };
 
-  // npc + 보행자 + 정적장애물 전부 모음 (리뷰 지적 #2 수정)
+  // npc + 보행자 + 정적장애물 전부 모음 
   std::vector<Obs> gatherObstacles()
   {
     std::vector<Obs> v;
@@ -92,8 +92,9 @@ private:
     std::vector<nav_msgs::Path> out;
     const int n = local_path_.poses.size();
 
-    double speed = std::hypot(ego_.velocity.x, ego_.velocity.y); // m/s
-    double v_kmh = speed * 3.6;
+    // /ego_status 의 velocity 는 MORAI UDP 원본이라 이미 km/h 다(브릿지가 변환 안 함).
+    // 예전엔 이걸 m/s 로 착각하고 3.6을 또 곱해서 전방주시거리가 3.6배로 부풀어 있었다.
+    double v_kmh = std::hypot(ego_.velocity.x, ego_.velocity.y);
     int look = static_cast<int>(v_kmh * 0.2 * 2);
     if (look < 20) look = 20;
     int end_idx = std::min(look * 2, n - 1);         // 경로 끝 IndexError 방지 (리뷰 #7)
@@ -146,11 +147,22 @@ private:
         ps_msg.pose.orientation.w = 1.0;
         cand.poses.push_back(ps_msg);
       }
-      // 후보 뒤쪽을 기준경로 따라 연장
-      for (int i = end_idx; i < n; ++i) {
-        geometry_msgs::PoseStamped ps_msg = local_path_.poses[i];
-        // offset 유지하며 연장 (기준경로 법선방향)
-        cand.poses.push_back(ps_msg);
+      // 후보 뒤쪽을 기준경로 따라 조금만 연장.
+      //
+      // TAIL_EXTEND 로 길이를 제한하는 이유:
+      //   이 tail 은 모든 후보가 똑같이 공유하는 기준경로다. 즉 후보를 고르는 데는
+      //   아무 판별력이 없는데, selectLane 의 충돌검사는 후보 전체를 훑기 때문에
+      //   tail 에 장애물이 하나라도 걸리면 6개 후보가 전부 동시에 막힌다.
+      //   /local_path 를 ACC 용으로 84m 까지 늘렸으므로, 제한하지 않으면 70m 앞
+      //   장애물 때문에 회피 판단이 마비된다. 먼 장애물 대응은 ACC/behavior 몫.
+      //   여기 남기는 길이는 pure_pursuit 이 전방주시점(최대 20m)을 찾을 만큼이면 된다.
+      //
+      // ※ 알려진 이슈: 이 tail 은 offset 을 유지하지 않고 기준경로 원본 점을 그대로
+      //   붙이므로, S커브 끝(offset)과 tail(offset 0) 사이에 횡방향 불연속이 생긴다.
+      //   짧은 회피에선 pure_pursuit 이 뭉개서 무해하다. docs/lattice_design.md §3.4 참고.
+      const int TAIL_EXTEND = 12;
+      for (int i = end_idx; i < n && i < end_idx + TAIL_EXTEND; ++i) {
+        cand.poses.push_back(local_path_.poses[i]);
       }
       out.push_back(cand);
     }

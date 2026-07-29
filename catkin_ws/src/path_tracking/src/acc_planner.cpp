@@ -29,6 +29,11 @@ public:
     pnh.param("default_space",      params_.default_space,      params_.default_space);
     pnh.param("vehicle_length",     params_.vehicle_length,     params_.vehicle_length);
     pnh.param("distance_threshold", params_.distance_threshold, params_.distance_threshold);
+    pnh.param("lookahead",          params_.lookahead,          params_.lookahead);
+    pnh.param("lat_accel_limit",    params_.lat_accel_limit,    params_.lat_accel_limit);
+    pnh.param("brake_accel",        params_.brake_accel,        params_.brake_accel);
+    pnh.param("curve_baseline",     params_.curve_baseline,     params_.curve_baseline);
+    pnh.param("curve_min_speed",    params_.curve_min_speed,    params_.curve_min_speed);
     pnh.param("velocity_gain",      params_.velocity_gain,      params_.velocity_gain);
     pnh.param("distance_gain",      params_.distance_gain,      params_.distance_gain);
     pnh.param("cruise_speed_kmh",   cruise_kmh,                 cruise_kmh);
@@ -91,17 +96,35 @@ private:
 
   void run(const ros::TimerEvent&)
   {
-    if (!(has_local_ && has_ego_ && has_obj_)) return;  // 미수신 시 발행 보류
+    // 경로와 자차 상태는 없으면 계산 자체가 불가능하므로 발행 보류.
+    //
+    // 반면 /Object_topic 은 기다리지 않는다. "장애물이 하나도 없음" 은 정상 상태이지
+    // 데이터 없음이 아니다. 예전엔 has_obj_ 까지 요구해서, perception(또는 mock)이
+    // 안 떠 있으면 ACC 가 아무것도 발행하지 않았다 - 대회에서 perception 이 늦게
+    // 뜨면 그동안 종방향 제어가 통째로 비는 셈이다. 객체가 없으면 크루즈 + 곡률
+    // 제한만으로 목표속도를 낸다.
+    if (!(has_local_ && has_ego_)) return;
 
     std::vector<acc::Vec2> path = followPath();
     if (path.empty()) return;
 
     acc::Vec2 ego{ego_.position.x, ego_.position.y};
-    double ego_vel = std::hypot(ego_.velocity.x, ego_.velocity.y);  // m/s
+    // /ego_status 의 velocity 는 UDP 원본 그대로라 단위가 km/h 다(브릿지가 변환 안 함).
+    // 객체와 똑같이 m/s 로 바꿔야 한다. 안 그러면 실제보다 3.6배 빠른 줄 알고 계산한다.
+    double ego_vel = acc::speedKmhToMps(ego_.velocity.x, ego_.velocity.y);  // m/s
 
     std::vector<acc::ObjIn> objs = gatherObjects();
     acc::Lead lead = acc::selectLead(path, ego, objs, params_);
     double target = acc::computeTargetVelocity(ego_vel, lead, params_);
+
+    // 곡률 제한을 함께 반영한다. /target_velocity 가 종방향의 단일 권한이므로
+    // 크루즈·앞차추종·곡률(나중엔 behavior 까지)을 여기서 모두 합쳐 최종값 하나로 낸다.
+    double curve_limit = acc::curvatureSpeedLimit(path, params_);
+    if (curve_limit < target) {
+      ROS_INFO_THROTTLE(2.0, "[acc] 곡률 제한 적용: %.2f -> %.2f m/s (%.1f km/h)",
+                        target, curve_limit, curve_limit * 3.6);
+      target = curve_limit;
+    }
 
     std_msgs::Float64 msg;
     msg.data = target;

@@ -1,0 +1,61 @@
+<?xml version="1.0"?>
+<!--
+  ACC(종방향 제어) 검증 스택.
+  ※ 먼저 다른 터미널에서 브릿지를 켜둘 것 (roscore + /ego_status + /ctrl_cmd).
+
+  실행:  roslaunch path_tracking acc.launch
+
+  ※ path_tracker 를 따로 또 실행하지 말 것. ROS 는 같은 이름의 노드가 새로 등록되면
+    먼저 뜬 쪽을 강제 종료한다("Reason: new node registered with same name").
+    그러면 /local_path 가 끊기고, ACC 는 앞차를 못 찾아 크루즈(60kph)만 내보낸다.
+  차를 안 움직이고 RViz 배치만 보고 싶으면:
+         roslaunch path_tracking acc.launch drive:=false
+    단, 이 경우 /local_path 가 발행되지 않는다. acc_planner 는 "앞차가 내 경로 위에
+    있는가"를 /local_path 기준으로 판정하므로, 앞차를 못 잡고 크루즈 속도만 낸다.
+    ACC 동작 검증은 drive:=true 로 할 것.
+  앞차 조건 바꾸기:
+         roslaunch path_tracking acc.launch start_gap:=50 lead_speed_kmh:=10
+
+  ※ mock_lead_vehicle 은 /Object_topic 에 가짜 앞차를 쏘는 ROS 노드다.
+    MORAI 시뮬레이터는 이 차의 존재를 모른다 - 시뮬 화면엔 안 보이고 RViz 에만 보인다.
+    나중에 시뮬 실제 NPC 로 바꿀 때는 mock_lead_vehicle 만 끄면 된다(인터페이스 동일).
+-->
+<launch>
+  <arg name="drive"          default="true"/>   <!-- path_tracker 로 실제 주행할지 -->
+  <arg name="mock_lead"      default="true"/>   <!-- 가짜 앞차를 띄울지 -->
+  <arg name="start_gap"      default="30.0"/>   <!-- 경로 시작에서 앞차까지 [m] -->
+  <arg name="lead_speed_kmh" default="18.0"/>   <!-- 앞차 속도 [km/h] -->
+
+  <!-- 규정 상한은 60km/h 지만 목표를 55 로 둔다.
+       target 60.0 으로 달렸을 때 실측 속도가 60.1~60.2 km/h 로 넘어갔다. 규정상
+       60 초과는 15초 + 3초당 15초 패널티라, 오버슈트 여유를 두는 편이 안전하다.
+       실제 상한은 acc_planner 의 곡률 제한이 구간별로 더 낮춘다. -->
+  <arg name="cruise_speed_kmh" default="55.0"/>
+  <arg name="lookahead"        default="60.0"/>  <!-- ACC 전방 탐색 [m] -->
+
+  <!-- 차량 시각화 (차 박스 + 지나온 궤적) -->
+  <node pkg="udp_bridge" type="ego_viz.py" name="ego_viz" output="screen"/>
+
+  <!-- 가짜 앞차 (경로 위를 따라 전진). 한 바퀴 완주 확인처럼 앞차가 방해되는
+       상황에서는 mock_lead:=false 로 끄면 크루즈+곡률 제한만으로 달린다. -->
+  <node if="$(arg mock_lead)"
+        pkg="path_tracking" type="mock_lead_vehicle" name="mock_lead_vehicle" output="screen">
+    <param name="start_gap"      value="$(arg start_gap)"/>
+    <param name="lead_speed_kmh" value="$(arg lead_speed_kmh)"/>
+  </node>
+
+  <!-- 장애물/NPC 시각화 -->
+  <node pkg="path_tracking" type="object_viz" name="object_viz" output="screen"/>
+
+  <!-- ACC: /local_path + /ego_status + /Object_topic -> /target_velocity -->
+  <node pkg="path_tracking" type="acc_planner" name="acc_planner" output="screen">
+    <param name="cruise_speed_kmh" value="$(arg cruise_speed_kmh)"/>
+    <param name="lookahead"        value="$(arg lookahead)"/>
+  </node>
+
+  <!-- 경로 추종 (이게 /local_path 를 발행하므로 ACC 가 앞차를 '경로 위'로 판정할 수 있다) -->
+  <node if="$(arg drive)" pkg="path_tracking" type="path_tracker.py"
+        name="path_tracker" output="screen"/>
+
+  <node pkg="rviz" type="rviz" name="rviz" args="-d $(find udp_bridge)/rviz/ego.rviz"/>
+</launch>
