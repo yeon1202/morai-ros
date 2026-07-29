@@ -35,6 +35,16 @@ struct AccParams {
   double brake_accel        = 2.0;    // [m/s^2] 곡선 진입 전 감속에 쓸 감속도
   double curve_baseline     = 10.0;   // [m] 곡률 계산용 앞뒤 기준거리
   double curve_min_speed    = 2.0;    // [m/s] 곡률 제한의 하한 (헤어핀에서 0 방지)
+
+  // --- 목표속도 상승률 제한 (커브 탈출 사행 억제) ---
+  //
+  // curvatureSpeedLimit 은 /local_path(앞쪽)만 훑으므로 커브 정점을 지나는 순간
+  // 제한이 그 프레임에 즉시 풀린다. 커브 진입에는 감속 프로파일이 있지만
+  // 탈출에는 대응하는 가속 프로파일이 없어 목표속도가 한 스텝에 크루즈까지 열린다.
+  // 그 급상승이 복귀 조향을 흔들어 S자 사행을 만든다.
+  double accel_rate_limit   = 1.0;    // [m/s^2] 목표속도 상승률 한계
+  double rate_limit_windup  = 2.0;    // [m/s] 실제속도보다 이만큼 이상 앞서지 않게
+  double rate_dt_max        = 0.5;    // [s] 한 스텝으로 인정하는 dt 상한
 };
 
 // 경로 위로 투영한 결과 (Frenet 좌표)
@@ -188,6 +198,30 @@ inline double computeTargetVelocity(double ego_vel, const Lead& lead, const AccP
   out_vel = std::min(out_vel, p.max_speed);
   if (out_vel < 0.0) out_vel = 0.0;
   return out_vel;
+}
+
+// 목표속도의 "상승"만 제한한다. 감속은 그대로 통과시킨다.
+//
+// 왜 필요한가: curvatureSpeedLimit 은 앞쪽 경로만 보므로 커브를 빠져나오는 순간
+// 제한이 즉시 풀린다. 목표속도가 한 스텝에 11 m/s 씩 뛰면 복귀 조향이 수렴하기
+// 전에 속도가 붙어 사행이 커진다. 목표를 천천히 올리는 것 자체가 "커브가 아직
+// 안 끝났다"는 보수적 판정 역할을 한다.
+//
+// 안전 불변식: 반환값은 어떤 경로로도 desired 를 넘지 않는다. 이 함수는 목표를
+// 늦출 뿐 높이지 않는다. 규정 상한(60kph)과 곡률 제한은 이미 desired 에 반영되어
+// 있으므로, 이 불변식이 지켜지는 한 이 함수가 제한을 우회할 수 없다.
+inline double rampTarget(double prev, double desired, double ego_vel,
+                         double dt, const AccParams& p) {
+  if (dt <= 0.0) return desired;               // 제한 로직이 차를 잠그지 않게
+  if (dt > p.rate_dt_max) dt = p.rate_dt_max;  // 프레임 끊김 시 한 번에 뛰지 않게
+
+  // 목표가 실제 속도보다 크게 앞서 있으면 끌어내린다.
+  // 차가 목표를 못 따라가는 동안(오르막, 제동 직후) 목표만 혼자 달아나면,
+  // 회복되는 순간 그 격차만큼 급가속한다. 제한이 걸린 것처럼 보이지만 무력화된 상태다.
+  double anchored = std::min(prev, ego_vel + p.rate_limit_windup);
+
+  if (desired <= anchored) return desired;     // 감속은 제한하지 않는다
+  return std::min(desired, anchored + p.accel_rate_limit * dt);
 }
 
 }  // namespace acc

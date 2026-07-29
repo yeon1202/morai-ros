@@ -288,3 +288,47 @@ TEST(SelectLead, EmptyNoLead) {
   Lead lead = selectLead(path, ego, objs, p);
   EXPECT_FALSE(lead.present);
 }
+
+// ---------------------------------------------------------------------------
+// rampTarget : 목표속도 상승률 제한
+// ---------------------------------------------------------------------------
+
+// 목표가 크게 뛰어도 한 스텝에 accel_rate_limit*dt 만큼만 오른다
+TEST(RampTarget, RiseIsLimited) {
+  AccParams p = defaultParams();
+  // prev=4.0 에서 desired=15.3 으로 뛰어도 4.0 + 1.0*0.05 = 4.05
+  EXPECT_NEAR(rampTarget(4.0, 15.3, 4.0, 0.05, p), 4.05, 1e-9);
+}
+
+// 감속은 제한하지 않는다 (급정지 반응이 느려지면 안 된다)
+TEST(RampTarget, FallIsNotLimited) {
+  AccParams p = defaultParams();
+  EXPECT_NEAR(rampTarget(15.0, 0.0, 15.0, 0.05, p), 0.0, 1e-9);
+}
+
+// 목표에 거의 도달했으면 목표를 넘지 않는다 (오버슛 없음)
+TEST(RampTarget, DoesNotOvershootDesired) {
+  AccParams p = defaultParams();
+  // 14.9 + 1.0*0.5 = 15.4 지만 desired 가 15.0 이므로 15.0 에서 멈춘다
+  EXPECT_NEAR(rampTarget(14.9, 15.0, 14.9, 0.5, p), 15.0, 1e-9);
+}
+
+// dt 가 0 이하이면 제한하지 않는다 (로직이 차를 잠그지 않게)
+TEST(RampTarget, ZeroDtPassesThrough) {
+  AccParams p = defaultParams();
+  EXPECT_NEAR(rampTarget(4.0, 15.3, 4.0, 0.0, p), 15.3, 1e-9);
+}
+
+// 프레임이 끊겨 dt 가 커져도 rate_dt_max 로 잘린다
+TEST(RampTarget, LargeDtIsClamped) {
+  AccParams p = defaultParams();
+  // dt=10 이지만 0.5 로 잘려 4.0 + 1.0*0.5 = 4.5
+  EXPECT_NEAR(rampTarget(4.0, 15.3, 4.0, 10.0, p), 4.5, 1e-9);
+}
+
+// 목표가 실제 속도보다 크게 앞서 있으면 끌어내린 뒤 올린다 (윈드업 억제)
+TEST(RampTarget, WindupIsAnchoredToEgoSpeed) {
+  AccParams p = defaultParams();
+  // prev=14.0 이지만 ego=4.0 이므로 4.0+2.0=6.0 으로 당겨지고, 6.0+0.05 = 6.05
+  EXPECT_NEAR(rampTarget(14.0, 15.3, 4.0, 0.05, p), 6.05, 1e-9);
+}
