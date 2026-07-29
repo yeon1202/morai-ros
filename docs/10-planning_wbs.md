@@ -2,7 +2,7 @@
 
 작성일: 2026-07-16 / planning (solo)
 범위: **planning 모듈 중심** + 타팀(localization·perception·control) 인터페이스
-관련: [morai 대회/로드맵], docs/acc_design.md, docs/lattice_design.md, docs/acc_plan.md
+관련: [morai 대회/로드맵], docs/40-acc_design.md, docs/30-lattice_design.md, docs/41-acc_plan.md
 
 **상태 범례:** ✅ 완료 · 🔄 진행중 · ⬜ 예정 · ⏸ 보류(stretch)
 
@@ -35,7 +35,7 @@
 | 3.4 | 오프라인 검증 (정적장애물 회피 2.65m) | ✅ | |
 | 3.5 | MORAI 실차 회피 확인 | ⬜ | |
 | 3.6 | [개선] tail 불연속 수정 (법선방향 offset 유지) | ⏸ | Frenet이 근본해결 |
-| — | 문서: `lattice_design.md`, `lattice_code_review.md` | ✅ | |
+| — | 문서: `30-lattice_design.md`, `31-lattice_code_review.md` | ✅ | |
 
 ## 4. 종방향 제어 (ACC) — `/target_velocity`
 | ID | 작업 | 상태 | 비고 |
@@ -46,7 +46,7 @@
 | 4.4 | `path_tracker` 임시 통합 (`/target_velocity` 구독) | ⬜ | Task5 |
 | 4.5 | `/target_velocity` 인터페이스 문서 (control 인계) | ⬜ | Task6 |
 | 4.6 | 실차 확인 + gain 튜닝 (velocity_gain/distance_gain) | ⬜ | 시뮬에서 |
-| — | 문서: `acc_design.md`, `acc_plan.md` | ✅ | |
+| — | 문서: `40-acc_design.md`, `41-acc_plan.md` | ✅ | |
 
 ## 5. Behavior FSM (미션 로직) — 점수원
 | ID | 작업 | 상태 | 비고 |

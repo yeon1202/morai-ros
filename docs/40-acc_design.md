@@ -4,7 +4,7 @@
 작성: planning (solo)
 상태: 설계 승인됨 → 구현 대기
 
-관련 문서: [lattice_code_review.md](lattice_code_review.md), [perception_interface.md](perception_interface.md), [localization_interface.md](localization_interface.md)
+관련 문서: [31-lattice_code_review.md](31-lattice_code_review.md), [20-perception_interface.md](20-perception_interface.md), [21-localization_interface.md](21-localization_interface.md)
 
 ---
 
@@ -92,7 +92,7 @@ target_vel = max(target_vel, 0)
 - 타입: **`std_msgs/Float64`**
 - 단위: **m/s** (localization `/odom` twist.linear와 동일 단위계)
 - 발행 주기: 30Hz
-- **control팀 계약**: 미수신 또는 오래됨(>0.3s)이면 ACC 미동작으로 간주하고 **안전하게 정지로 폴백**할 것. (별도 `docs/target_velocity_interface.md`로 명세 예정)
+- **control팀 계약**: 미수신 또는 오래됨(>0.3s)이면 ACC 미동작으로 간주하고 **안전하게 정지로 폴백**할 것. (별도 `docs/22-target_velocity_interface.md`로 명세 예정)
 
 ---
 
@@ -130,4 +130,4 @@ target_vel = max(target_vel, 0)
 | `path_tracking/launch/sim.launch` | acc_planner 노드 추가 |
 | `path_tracking/src/mock_*.cpp` | 움직이는 앞차 시나리오 추가/확장 |
 | `path_tracking/scripts/path_tracker.py` | (임시) `/target_velocity` 구독해 종제어에 사용 |
-| `docs/target_velocity_interface.md` | **신규** — control팀 인계용 인터페이스 명세 |
+| `docs/22-target_velocity_interface.md` | **신규** — control팀 인계용 인터페이스 명세 |

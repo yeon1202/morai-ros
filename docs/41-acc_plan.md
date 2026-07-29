@@ -8,7 +8,7 @@
 
 **Tech Stack:** ROS1 Noetic, roscpp, C++11, catkin_make, gtest(catkin_add_gtest), morai_msgs, std_msgs/Float64.
 
-설계문서: [acc_design.md](acc_design.md)
+설계문서: [40-acc_design.md](40-acc_design.md)
 
 ## Global Constraints
 
@@ -35,7 +35,7 @@
 | `catkin_ws/src/path_tracking/package.xml` | **수정**. std_msgs 의존 추가. |
 | `catkin_ws/src/path_tracking/launch/sim.launch` | **수정**. acc_planner, mock_lead_vehicle 노드 추가. |
 | `catkin_ws/src/path_tracking/scripts/path_tracker.py` | **수정(임시)**. `/target_velocity` 구독해 종제어에 사용. |
-| `docs/target_velocity_interface.md` | **신규**. control팀 인계용 인터페이스 명세. |
+| `docs/22-target_velocity_interface.md` | **신규**. control팀 인계용 인터페이스 명세. |
 
 ---
 
@@ -736,11 +736,11 @@ git commit -m "feat(acc): path_tracker가 /target_velocity로 종제어(임시 �
 ## Task 6: control팀 인계 인터페이스 문서
 
 **Files:**
-- Create: `docs/target_velocity_interface.md`
+- Create: `docs/22-target_velocity_interface.md`
 
 - [ ] **Step 1: 인터페이스 문서 작성**
 
-Create `docs/target_velocity_interface.md`:
+Create `docs/22-target_velocity_interface.md`:
 
 ```markdown
 # /target_velocity 인터페이스 (planning → control)
@@ -768,7 +768,7 @@ ACC(`acc_planner`)가 발행하는 **종방향 목표속도**. control팀 추종
 - 조향은 별개(`/lattice_path` 또는 `/local_path` 추종). ACC는 `/ctrl_cmd`를 건드리지 않음.
 
 ## 관련
-- 설계: [acc_design.md](acc_design.md)
+- 설계: [40-acc_design.md](40-acc_design.md)
 - lattice(횡) 출력: `/lattice_path`
 ```
 
@@ -776,7 +776,7 @@ ACC(`acc_planner`)가 발행하는 **종방향 목표속도**. control팀 추종
 
 ```bash
 cd ~/morai-ros
-git add docs/target_velocity_interface.md
+git add docs/22-target_velocity_interface.md
 git commit -m "docs(acc): /target_velocity 인터페이스 명세 (control 인계)"
 ```
 

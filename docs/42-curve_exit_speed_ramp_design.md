@@ -2,7 +2,7 @@
 
 작성일: 2026-07-29
 대상: `acc_core.hpp`, `acc_planner.cpp`
-관련: `acc_design.md`(ACC 전반), `lattice_design.md`
+관련: `40-acc_design.md`(ACC 전반), `30-lattice_design.md`
 
 ## 1. 문제
 
@@ -209,4 +209,4 @@ dt = now - prev_time_
 
 - 유턴 정점의 조향 포화로 인한 CTE 2.06m 자체. `MIN_LFD` 조정 또는 접근구간
   재기록으로 별도 대응한다.
-- lattice tail 불연속(`lattice_design.md` 3.4 / 7 참고).
+- lattice tail 불연속(`30-lattice_design.md` 3.4 / 7 참고).

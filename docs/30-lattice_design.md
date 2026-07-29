@@ -4,7 +4,7 @@
 작성: planning (solo)
 상태: **구현·오프라인검증 완료** (정적장애물 회피 end-to-end 확인, 회피 2.65m)
 
-관련 문서: [acc_design.md](acc_design.md), [lattice_code_review.md](lattice_code_review.md)(3차곡선 유도·좌표변환 수식 상세), [perception_interface.md](perception_interface.md), [fot_theory.md](fot_theory.md)
+관련 문서: [40-acc_design.md](40-acc_design.md), [31-lattice_code_review.md](31-lattice_code_review.md)(3차곡선 유도·좌표변환 수식 상세), [20-perception_interface.md](20-perception_interface.md), [03-fot_theory.md](03-fot_theory.md)
 
 ---
 
@@ -18,9 +18,9 @@ ACC가 **종방향(속도)** 을 담당하듯, lattice는 **횡방향(조향 회
 - 못 피하는 경우(전 후보 충돌)는 **경고만** 내고 정지는 ACC/behavior에 위임
 
 ### 범위 밖
-- **종방향 속도 제어**: ACC 몫 ([acc_design.md](acc_design.md))
+- **종방향 속도 제어**: ACC 몫 ([40-acc_design.md](40-acc_design.md))
 - **정지 판단**: 다 막혔을 때 실제 정지는 ACC/behavior FSM
-- **시간축 궤적·동적장애물 예측**: FOT(stretch goal, [fot_theory.md](fot_theory.md))
+- **시간축 궤적·동적장애물 예측**: FOT(stretch goal, [03-fot_theory.md](03-fot_theory.md))
 
 ---
 
@@ -68,7 +68,7 @@ ACC와 대칭인 **순수 planning 노드**. `/ctrl_cmd`는 건드리지 않는�
   - 경계조건: `y(0)=ps, y'(0)=0, y(xf)=pf, y'(xf)=0` (시작·끝 기울기 0 → 부드러운 진입/복귀)
   - 계수: `a0=ps, a1=0, a2=3(pf-ps)/xf², a3=-2(pf-ps)/xf³`
 - 후보 뒤쪽은 기준경로를 따라 연장
-- 상세 유도는 [lattice_code_review.md](lattice_code_review.md)
+- 상세 유도는 [31-lattice_code_review.md](31-lattice_code_review.md)
 
 ### 3.4 후보 선택 (selectLane)
 - 비용 = `BASE_WEIGHT`(중앙 선호 {3,2,1,1,2,3}) + 충돌 시 `COLLISION_PENALTY(100)`
@@ -112,7 +112,7 @@ ACC와 대칭인 **순수 planning 노드**. `/ctrl_cmd`는 건드리지 않는�
 
 ## 7. Frenet(FOT) 확장 훅 — 나중에 시간축 갈아끼우기 쉽게
 
-지금 구조는 사실상 (s, d) 격자의 단순형이다. 아래를 의식해두면 FOT 이식 비용이 최소화된다. (상세: [frenet-ready-design], docs/fot_theory.md)
+지금 구조는 사실상 (s, d) 격자의 단순형이다. 아래를 의식해두면 FOT 이식 비용이 최소화된다. (상세: [frenet-ready-design], docs/03-fot_theory.md)
 
 | 현재 | Frenet 확장 방향 |
 |------|------------------|

@@ -159,7 +159,7 @@ private:
       //
       // ※ 알려진 이슈: 이 tail 은 offset 을 유지하지 않고 기준경로 원본 점을 그대로
       //   붙이므로, S커브 끝(offset)과 tail(offset 0) 사이에 횡방향 불연속이 생긴다.
-      //   짧은 회피에선 pure_pursuit 이 뭉개서 무해하다. docs/lattice_design.md §3.4 참고.
+      //   짧은 회피에선 pure_pursuit 이 뭉개서 무해하다. docs/30-lattice_design.md §3.4 참고.
       const int TAIL_EXTEND = 12;
       for (int i = end_idx; i < n && i < end_idx + TAIL_EXTEND; ++i) {
         cand.poses.push_back(local_path_.poses[i]);
