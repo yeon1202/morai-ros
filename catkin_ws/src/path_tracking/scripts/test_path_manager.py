@@ -113,7 +113,55 @@ def main():
 
     ok = (not new_bad) and (not short_local)
     print('\n%s' % ('PASS - 겹침 구간에서도 안 튐' if ok else 'FAIL'))
-    return 0 if ok else 1
+
+    ok2 = test_finish_latch()
+    return 0 if (ok and ok2) else 1
+
+
+def test_finish_latch():
+    """완주 후 두 바퀴째로 넘어가지 않는지 검증.
+
+    우리 경로는 완주 지점(끝)과 코스 진입 지점이 물리적으로 같은 자리다.
+    완주 감지가 없으면 경로 끝을 지나 10m(RESET_DISTANCE) 넘게 벗어나는 순간
+    전역 재탐색이 바로 옆의 진입부 인덱스를 잡아 다시 달리기 시작한다.
+    실제 주행에서 관측됐다 - 완주 0.7초 뒤 idx 4633 에서 909 로 뛰었다.
+
+    경로 끝을 지나 진입부 쪽으로 계속 나아가는 상황을 재현한다.
+    """
+    path = load_path()
+    n = len(path)
+    pm = PathManager(path, False, LOCAL_PATH_SIZE)
+    pm.velocity_profile = [0.0] * n     # get_local_path 가 참조하므로 채워둔다
+
+    print('\n--- 완주 latch 검증 ---')
+
+    # 경로 끝 20점을 정상 주행해 완주 상태로 만든다
+    for i in range(n - 20, n):
+        pm.get_local_path(VehicleState(path[i].x, path[i].y, 0, 0))
+
+    if not pm.finished:
+        print('  FAIL - 경로 끝에 닿았는데 finished 가 서지 않았다')
+        return False
+    print('  경로 끝 도달 -> finished=True, idx=%d' % pm.current_waypoint)
+
+    # 끝점에서 진입부(실측 점프 대상 idx 909) 방향으로 30m 계속 나아간다
+    ex, ey = path[n - 1].x, path[n - 1].y
+    tx, ty = path[909].x, path[909].y
+    d = hypot(tx - ex, ty - ey)
+    ux, uy = (tx - ex) / d, (ty - ey) / d
+
+    worst = 0
+    for step in range(1, 31):
+        pm.get_local_path(VehicleState(ex + ux * step, ey + uy * step, 0, 0))
+        worst = max(worst, abs(pm.current_waypoint - (n - 1)))
+
+    print('  끝점에서 진입부 방향 30m 진행 (실측 점프 지점까지 %.0fm)' % d)
+    print('  그동안 인덱스가 끝(%d)에서 최대 %d칸 벗어남' % (n - 1, worst))
+
+    ok = (worst == 0) and pm.finished
+    print('\n%s' % ('PASS - 완주 후 두 바퀴째로 안 넘어감'
+                    if ok else 'FAIL - 인덱스가 진입부로 튐'))
+    return ok
 
 
 if __name__ == '__main__':

@@ -13,6 +13,7 @@ class PathManager:
     SEARCH_BACK = 10         # 직전 인덱스에서 뒤로 볼 범위 [점] (정지·후진·노이즈 대비)
     SEARCH_AHEAD = 100       # 앞으로 볼 범위 [점] (0.5m 간격 기준 약 60m)
     RESET_DISTANCE = 10.0    # 창 안에서 이보다 멀면 창을 잘못 물고 있는 것 -> 전역 재탐색 [m]
+    FINISH_MARGIN = 3        # 경로 끝에서 이 개수 이내에 닿으면 완주로 본다 [점]
 
     def __init__(self, path, is_closed_path, local_path_size):
         self.path = path
@@ -23,6 +24,7 @@ class PathManager:
         self.current_waypoint = None  # 직전 최근접 인덱스 (None이면 전역탐색)
         self.cte = 0.0                # 최근접 waypoint 까지 거리 = 경로 이탈량 [m]
         self.relocated = 0            # 전역 재탐색이 일어난 횟수 (진단용)
+        self.finished = False         # 경로 끝에 도달했는가 (한 번 서면 계속 유지)
 
     def set_velocity_profile(self, max_velocity, road_friction, window_size):
         # TODO: moving window를 설정하는 방식 개선.
@@ -104,6 +106,15 @@ class PathManager:
         position = vehicle_state.position
         n = len(self.path)
 
+        # 이미 완주했으면 더 이상 탐색하지 않고 끝 인덱스에 고정한다.
+        #
+        # 우리 경로는 완주 지점(끝)과 코스 진입 지점이 물리적으로 같은 자리다.
+        # 전역 재탐색을 그대로 두면 경로 끝을 지나 10m 넘게 벗어나는 순간
+        # 바로 옆의 진입부 인덱스를 잡아 두 바퀴째를 돌기 시작한다. 실제로
+        # 관측됐다 - 완주 0.7초 뒤 idx 4633 에서 909 로 뛰어 계속 주행했다.
+        if self.finished:
+            return n - 1, self._scan(position, [n - 1])[1]
+
         if self.current_waypoint is None:      # 첫 호출 - 기억이 없으니 전체 탐색
             return self._scan(position, range(n))
 
@@ -151,6 +162,11 @@ class PathManager:
         current_waypoint, _ = self.find_nearest_waypoint(vehicle_state)
         self.current_waypoint = current_waypoint
         self.cte = self._perpendicular_distance(vehicle_state.position, current_waypoint)
+
+        # 열린 경로에서 끝에 닿으면 완주로 기록한다. 소비자(path_tracker)가
+        # 이 플래그를 보고 정지시킨다.
+        if not self.is_closed_path and current_waypoint >= len(self.path) - self.FINISH_MARGIN:
+            self.finished = True
 
         if current_waypoint + self.local_path_size < len(self.path):
             local_path = self.path[current_waypoint:current_waypoint + self.local_path_size]

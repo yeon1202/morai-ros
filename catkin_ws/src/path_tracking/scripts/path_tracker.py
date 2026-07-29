@@ -135,6 +135,7 @@ class PathTracker:
         # 차가 마지막 accel 명령으로 계속 가속한다. 종료 시 반드시 제동을 걸어준다.
         # (실제 제동은 SIGINT 핸들러에서 - brake_now() 주석 참고)
         self._braked = False
+        self._finish_logged = False            # 완주 로그를 한 번만 찍기 위한 플래그
         rospy.on_shutdown(self.brake_now)      # kill -TERM 등 최후 수단
 
         rospy.loginfo('[path_tracker] 시작 - 목표속도 %.0f km/h', TARGET_SPEED_KMH)
@@ -181,6 +182,20 @@ class PathTracker:
         local_path, fallback_velocity = self.path_manager.get_local_path(vs)
         target_velocity = self._target_velocity(fallback_velocity)
         self.lpath_pub.publish(self._to_path_msg(local_path))  # lattice가 이걸 받아 회피경로 생성
+
+        # 완주했으면 정지한다.
+        #
+        # 우리 경로는 완주 지점과 코스 진입 지점이 물리적으로 같은 자리라, 이게
+        # 없으면 경로 끝을 지나자마자 진입부 인덱스를 다시 잡아 두 바퀴째를 돈다
+        # (실측: 완주 0.7초 뒤 idx 4633 -> 909 로 뛰어 계속 주행).
+        # 제동거리가 있어 결승선을 지나 멈추는 것은 정상이다.
+        if self.path_manager.finished:
+            if not self._finish_logged:
+                rospy.loginfo('[path_tracker] 완주 - 정지한다 (waypoint %d/%d)',
+                              self.path_manager.current_waypoint, len(self.path))
+                self._finish_logged = True
+            self._publish_stop()
+            return
 
         # 경로에서 너무 벗어났으면 조향하지 말고 정지 (근거는 MAX_CTE 주석 참고)
         if self.path_manager.cte > MAX_CTE:

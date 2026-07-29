@@ -60,6 +60,7 @@ class LapLogger:
 
         self.rows = []          # (t, idx, cte, speed_kmh)
         self.last_log = 0.0
+        self._reported = False  # 요약을 두 번 찍지 않도록
 
         self.f = open(self.out_path, 'w')
         self.w = csv.writer(self.f)
@@ -84,12 +85,25 @@ class LapLogger:
         idx = self.pm.current_waypoint
         cte = self.pm.cte
 
+        # 완주 후에는 기록하지 않는다. 인덱스가 경로 끝에 고정된 채 차만 나아가면
+        # CTE 가 실제 이탈이 아닌데도 계속 커진다(실측 0.96 -> 9.75m). 이걸 그대로
+        # 두면 요약에서 최악 구간으로 잡혀 판단을 그르친다.
+        if self.pm.finished:
+            if not self._reported:
+                rospy.loginfo('[lap_logger] 완주 감지 - 기록을 멈추고 요약한다')
+                self.report()
+            return
+
         self.rows.append((now, idx, cte, speed_kmh))
         self.w.writerow(['%.3f' % now, idx, '%.3f' % cte, '%.2f' % speed_kmh,
                          '%.3f' % msg.position.x, '%.3f' % msg.position.y])
 
     def report(self):
-        self.f.close()
+        if self._reported:
+            return
+        self._reported = True
+        if not self.f.closed:
+            self.f.close()
         rows = [r for r in self.rows if r[1] >= self.start_idx]
         if not rows:
             rospy.logwarn('[lap_logger] idx %d 이후 샘플이 없다', self.start_idx)
