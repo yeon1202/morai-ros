@@ -43,6 +43,7 @@
 | [40-acc_design.md](40-acc_design.md) | ACC 설계. `/target_velocity`가 종방향 단일 권한이라는 원칙 |
 | [41-acc_plan.md](41-acc_plan.md) | ACC 구현 계획(Task 단위). 진행 상태 포함 |
 | [42-curve_exit_speed_ramp_design.md](42-curve_exit_speed_ramp_design.md) | 커브 탈출 시 목표속도 상승률 제한 설계 |
+| [43-curve_exit_speed_ramp_plan.md](43-curve_exit_speed_ramp_plan.md) | 위 설계의 구현 계획(Task 단위) |
 
 ## 다음 번호대 (예정)
 
