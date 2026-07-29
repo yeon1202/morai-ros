@@ -162,7 +162,86 @@ DEV '... && /home/dev/catkin_ws/devel/lib/path_tracking/acc_core_test'
 Python 노드는 재빌드가 필요 없다. `catkin_ws` 가 호스트 마운트라 호스트에서
 파일을 고치면 컨테이너에 바로 반영된다.
 
-## 6. 자주 걸리는 함정
+## 6. 경로 재기록 (전체)
+
+global path 는 lattice·ACC·behavior 가 전부 그 위에서 도는 토대다. 다시 딸 때는
+아래 순서를 그대로 따른다.
+
+### 6.0 준비
+
+```bash
+# 백업 (git 에도 있지만 손에 두는 편이 편하다)
+cd ~/morai-ros/catkin_ws/src/path_tracking/path
+for f in approach.csv course.csv path.csv path_smooth.csv; do cp -v $f $f.bak; done
+```
+
+주행 노드를 반드시 내린다. 켜져 있으면 차가 저 혼자 달린다.
+
+```bash
+DEV '... && rosnode kill /path_tracker /acc_planner /lattice_planner 2>/dev/null; rosnode cleanup'
+```
+
+`/ego_status` 의 position 이 0,0,0 이면 브릿지가 Competition(9109)을 받는 중이라
+기록이 불가능하다. `udp_bridge.py` 의 `EGO_INFO_RECV_PORT` 를 9111 로 바꾸고
+시뮬에서 Ego Vehicle Status 를 켠다.
+
+MORAI 를 **수동 조작 모드**로 바꾼다. 마지막 `/ctrl_cmd`(보통 estop 의 brake=1)를
+계속 물고 있어 그냥은 안 움직인다.
+
+### 6.1 접근구간 기록 (스폰 -> 대회 라인 진입)
+
+차량을 스폰 지점 `(-14.19, -224.21)` 으로 리셋하고,
+
+```bash
+DEV '... && rosrun path_tracking path_recorder.py _file:=approach.csv'
+```
+
+대회 라인 진입점까지 몰고 **Ctrl+C**. 진입점을 조금 지나쳐도 된다.
+`path_join.py` 가 지나친 만큼 잘라낸다.
+
+**`_file:=` 를 빼먹으면 기존 `path.csv` 를 그 자리에서 덮어쓴다.**
+
+### 6.2 코스 기록 (한 바퀴)
+
+진입점에서 이어서,
+
+```bash
+DEV '... && rosrun path_tracking path_recorder.py _file:=course.csv'
+```
+
+한 바퀴 돌고 **출발점을 조금 지나서** Ctrl+C. 겹친 만큼은 `path_join.py` 가
+잘라낸다. 반대로 못 미치면 경로가 끊긴다.
+
+기록 중에는 **차로 중앙을 따라 매끄럽게** 몰 것. 여기서 대충 몰면 그 오차가
+그대로 global path 가 되고, 추종을 아무리 잘해도 복구되지 않는다.
+차선 변경은 코스상 필요한 곳에서만 한다.
+
+### 6.3 합치고 다듬기
+
+```bash
+cd ~/morai-ros/catkin_ws/src/path_tracking/scripts
+python3 path_join.py        # approach + course -> path.csv
+python3 path_smoother.py    # path.csv -> path_smooth.csv (이동평균)
+# 코너가 너무 깎이면 창 크기를 줄인다 (기본 9)
+python3 path_smoother.py 5
+```
+
+### 6.4 검증 (주행 전에)
+
+```bash
+python3 test_path_manager.py   # 겹침 구간 최근접 탐색 + 완주 latch
+```
+
+둘 다 PASS 여야 한다. 그 다음 실제 주행으로 확인한다.
+
+```bash
+DEV '... && rosrun path_tracking lap_logger.py _out:=/tmp/lap.csv'
+```
+
+기준값(2026-07-29 초안 경로): 대회구간 CTE 평균 0.149m, 최대 0.429m,
+차로여유 0.654m 초과 0건. 새 경로가 이보다 나빠지면 안 된다.
+
+## 7. 자주 걸리는 함정
 
 | 증상 | 원인과 대처 |
 |---|---|
@@ -175,7 +254,7 @@ Python 노드는 재빌드가 필요 없다. `catkin_ws` 가 호스트 마운트
 | 차가 경로에서 멀리 떨어져 정지한다 | `path_tracker` 의 `MAX_CTE`(6.0m) 가드다. 시뮬에서 차를 경로 위로 되돌린다 |
 | 속도가 이상하다 | `/ego_status` 의 velocity 는 m/s 가 아니라 **km/h** 다. 소비 지점마다 변환해야 한다 |
 
-## 7. 고정값
+## 8. 고정값
 
 바꾸기 전에 이유를 먼저 확인할 값들이다.
 
