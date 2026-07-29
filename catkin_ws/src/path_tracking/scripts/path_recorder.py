@@ -23,7 +23,14 @@ class PathRecorder:
         #   __file__ = .../path_tracking/scripts/path_recorder.py
         #   dirname 두 번 올라가면 .../path_tracking
         pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.file_path = os.path.join(pkg_dir, 'path', 'path.csv')
+        # 저장 파일명을 파라미터로 받는다 (기본값은 기존과 동일)
+        #   예) rosrun path_tracking path_recorder.py _file:=approach.csv
+        fname = rospy.get_param('~file', 'path.csv')
+        self.file_path = os.path.join(pkg_dir, 'path', fname)
+
+        # 'w' 로 열면 기존 파일이 그 자리에서 날아가므로 미리 경고
+        if os.path.exists(self.file_path):
+            rospy.logwarn('[path_recorder] %s 가 이미 있습니다 - 덮어씁니다!', fname)
 
         self.f = open(self.file_path, 'w')
         self.writer = csv.writer(self.f)

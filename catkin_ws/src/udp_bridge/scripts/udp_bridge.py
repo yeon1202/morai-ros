@@ -1,28 +1,51 @@
 #!/usr/bin/env python3
 """
-UDP <-> ROS 브릿지
+UDP <-> ROS ë¸Œë¦¿ì§€ (GPS/IMU/ì¹´ë©”ë¼x3/LiDAR í†µí•©íŒ)
 ------------------------------------------------
-MORAI와는 UDP로, 우리 컨트롤러 노드들과는 ROS 토픽으로 통신합니다.
+MORAIì™€ëŠ” UDPë¡œ, ìš°ë¦¬ ì»¨íŠ¸ë¡¤ëŸ¬/ì¸ì§€ ë…¸ë“œë“¤ê³¼ëŠ” ROS í† í”½ìœ¼ë¡œ í†µì‹ í•©ë‹ˆë‹¤.
 
-발행: /ego_status  (morai_msgs/EgoVehicleStatus 재사용, 필요한 필드만 채움)
-구독: /ctrl_cmd     (morai_msgs/CtrlCmd) -> UDP로 변환해서 MORAI로 전송
+ë°œí–‰:
+  /ego_status              (morai_msgs/EgoVehicleStatus, í•„ìš”í•œ í•„ë“œë§Œ)
+  /gps                     (morai_msgs/GPSMessage) - NMEA 0183(GPRMC/GPGGA)
+  /imu                     (sensor_msgs/Imu) - ì‹¤ì°¨ í…ŒìŠ¤íŠ¸ë¡œ ì¶•/ë¶€í˜¸ ê²€ì¦ ì™„ë£Œ
+  /camera1/image_jpeg/compressed  (sensor_msgs/CompressedImage)
+  /camera2/image_jpeg/compressed  (sensor_msgs/CompressedImage)
+  /camera3/image_jpeg/compressed  (sensor_msgs/CompressedImage)
+  /lidar/points             (sensor_msgs/PointCloud2) - í‘œì¤€ Velodyne VLP-16 íŒ¨í‚· ë””ì½”ë”©
+êµ¬ë…:
+  /ctrl_cmd                (morai_msgs/CtrlCmd) -> UDPë¡œ ë³€í™˜í•´ì„œ MORAIë¡œ ì „ì†¡
+
+ê° íŒ¨í‚· í¬ë§·ì€ udp_packet_inspector.py / camera_packet_probe.py / camera_frame_save.pyë¡œ
+ì‹¤ì œ ìº¡ì²˜í•´ì„œ ê²€ì¦í•œ ê²ƒìž…ë‹ˆë‹¤ (GPS: í‘œì¤€ NMEA, IMU: ì‹¤ì°¨ í…ŒìŠ¤íŠ¸ë¡œ ì¶• ê²€ì¦ ì™„ë£Œ,
+ì¹´ë©”ë¼: SOI~EOI ìž˜ë¼ë‚´ë©´ ì™„ì „í•œ JPEG í•œ ìž¥, LiDAR: í‘œì¤€ Velodyne VLP-16 1206ë°”ì´íŠ¸ í¬ë§·).
 """
-
 import math
 import socket
 import struct
 import threading
-
+import numpy as np
 import rospy
-from morai_msgs.msg import CtrlCmd, EgoVehicleStatus
-from geometry_msgs.msg import Vector3
+from morai_msgs.msg import CtrlCmd, EgoVehicleStatus, GPSMessage
+from sensor_msgs.msg import Imu, CompressedImage, PointCloud2, PointField
+from geometry_msgs.msg import Vector3, Quaternion
+from std_msgs.msg import Header
 
 DEST_IP = "127.0.0.1"
-CTRL_CMD_PORT = 9093          # MORAI Network Settings의 Host PORT랑 일치해야 함
-EGO_INFO_RECV_PORT = 9111     # MORAI가 우리한테 보내는 목적지 포트
+CTRL_CMD_PORT = 9093          # MORAI Network Settingsì˜ Host PORTëž‘ ì¼ì¹˜í•´ì•¼ í•¨
+EGO_INFO_RECV_PORT = 9111     # [개발검증용 임시] 규정제출시 9109(Competition)로 복구!
+GPS_RECV_PORT = 2503
+IMU_RECV_PORT = 2505
+CAMERA_PORTS = {1: 2507, 2: 2509, 3: 2511}
+LIDAR_RECV_PORT = 2501
 
 STEER_RATIO_CORRECTION = 0.70
 STEER_SIGN = 1.0
+
+# ---- VLP-16 í‘œì¤€ ìŠ¤íŽ™ (Velodyne ê³µì‹ ì±„ë„ë³„ ìˆ˜ì§ê°ë„, ê³µê°œëœ ê°’) ----
+VLP16_VERTICAL_ANGLES_DEG = [
+    -15, 1, -13, 3, -11, 5, -9, 7, -7, 9, -5, 11, -3, 13, -1, 15
+]
+VLP16_VERTICAL_ANGLES_RAD = [math.radians(a) for a in VLP16_VERTICAL_ANGLES_DEG]
 
 
 class CtrlCmdUDP:
@@ -78,16 +101,236 @@ class EgoInfoReceiverUDP:
             return None
 
 
+class GpsReceiverUDP:
+    """NMEA 0183 í…ìŠ¤íŠ¸(GPRMC/GPGGA)."""
+
+    def __init__(self, ip, port, callback):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind((ip, port))
+        self._callback = callback
+        self._last_alt = 0.0
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while not rospy.is_shutdown():
+            raw_data, _ = self.sock.recvfrom(65535)
+            for line in raw_data.decode(errors="ignore").strip().split('\r\n'):
+                self._parse_line(line.strip())
+
+    @staticmethod
+    def _nmea_to_deg(dm_str, direction):
+        if not dm_str or '.' not in dm_str:
+            return None
+        dot = dm_str.index('.')
+        deg_len = dot - 2
+        deg = float(dm_str[:deg_len])
+        minutes = float(dm_str[deg_len:])
+        val = deg + minutes / 60.0
+        if direction in ('S', 'W'):
+            val = -val
+        return val
+
+    def _parse_line(self, line):
+        if not line.startswith('$'):
+            return
+        fields = line.split(',')
+        sentence = fields[0][1:]
+        try:
+            if sentence == 'GPRMC' and len(fields) >= 7 and fields[2] == 'A':
+                lat = self._nmea_to_deg(fields[3], fields[4])
+                lon = self._nmea_to_deg(fields[5], fields[6])
+                if lat is not None and lon is not None:
+                    self._callback(lat, lon, self._last_alt)
+            elif sentence == 'GPGGA' and len(fields) >= 10:
+                lat = self._nmea_to_deg(fields[2], fields[3])
+                lon = self._nmea_to_deg(fields[4], fields[5])
+                if fields[9]:
+                    self._last_alt = float(fields[9])
+                if lat is not None and lon is not None:
+                    self._callback(lat, lon, self._last_alt)
+        except (ValueError, IndexError):
+            pass
+
+
+class ImuReceiverUDP:
+    """MORAI ì»¤ìŠ¤í…€ ë°”ì´ë„ˆë¦¬ IMU íŒ¨í‚·. ì‹¤ì°¨ í…ŒìŠ¤íŠ¸ë¡œ ì¶•/ë¶€í˜¸ ê²€ì¦ ì™„ë£Œ
+    (ì •ì§€ì‹œ linear_acceleration.z=9.81, ì¢ŒíšŒì „ì‹œ angular_velocity.z ì–‘ìˆ˜ = ENU ì •í•©)."""
+    HEADER = '#IMUData$'
+
+    def __init__(self, ip, port, callback):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind((ip, port))
+        self._callback = callback
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while not rospy.is_shutdown():
+            raw_data, _ = self.sock.recvfrom(65535)
+            parsed = self._parse(raw_data)
+            if parsed is not None:
+                self._callback(parsed)
+
+    def _parse(self, raw_data):
+        try:
+            if raw_data[0:9].decode(errors="ignore") != self.HEADER:
+                return None
+            secs, nsecs = struct.unpack('<II', raw_data[25:33])
+            qw, qx, qy, qz = struct.unpack('<dddd', raw_data[33:65])
+            avx, avy, avz = struct.unpack('<ddd', raw_data[65:89])
+            lax, lay, laz = struct.unpack('<ddd', raw_data[89:113])
+            return {
+                "secs": secs, "nsecs": nsecs,
+                "quat_wxyz": (qw, qx, qy, qz),
+                "angular_velocity": (avx, avy, avz),
+                "linear_acceleration": (lax, lay, laz),
+            }
+        except (struct.error, IndexError):
+            return None
+
+
+class CameraReceiverUDP:
+    """모라이 공식 카메라 UDP 프로토콜 (26.R1 기준, Timestamp 필드 추가된 버전).
+    프레임 하나가 여러 UDP 패킷(조각)으로 나뉘어 올 수 있어서 Index/Size/Tail로 재조립한다.
+
+    패킷 구조 (총 65000 byte 고정):
+      Header(3B)="MOR" + Timestamp(8B) + Index(4B) + Size(4B)
+      + Partial JPEG Data(64979B, 뒤는 0 패딩, 앞 Size바이트만 유효) + Tail(2B)="AI"/"EI"(마지막 조각)
+    """
+
+    HEADER = b'MOR'
+    DATA_OFFSET = 19       # 3(header) + 8(timestamp) + 4(index) + 4(size)
+    DATA_FIELD_LEN = 64979
+    TAIL_LAST = b'EI'
+
+    def __init__(self, ip, port, callback):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+        self.sock.bind((ip, port))
+        self._callback = callback
+        self._chunks = {}
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while not rospy.is_shutdown():
+            raw_data, _ = self.sock.recvfrom(70000)
+            self._on_packet(raw_data)
+
+    def _on_packet(self, data):
+        if len(data) < self.DATA_OFFSET or data[0:3] != self.HEADER:
+            return
+        try:
+            index, size = struct.unpack('<ii', data[11:19])
+        except struct.error:
+            return
+        if size < 0 or self.DATA_OFFSET + size > len(data):
+            return
+        tail = data[self.DATA_OFFSET + self.DATA_FIELD_LEN:self.DATA_OFFSET + self.DATA_FIELD_LEN + 2]
+
+        if index == 0:
+            self._chunks = {}
+        self._chunks[index] = data[self.DATA_OFFSET:self.DATA_OFFSET + size]
+
+        if tail == self.TAIL_LAST:
+            jpeg = b''.join(self._chunks[i] for i in sorted(self._chunks))
+            self._chunks = {}
+            self._callback(jpeg)
+
+
+class Vlp16ReceiverUDP:
+    """í‘œì¤€ Velodyne VLP-16 UDP ë°ì´í„° íŒ¨í‚· (ê³µê°œ ìŠ¤íŽ™, 1206ë°”ì´íŠ¸) ë””ì½”ë”©.
+    í•œ ë°”í€´(360ë„) ë‹¤ ëŒë©´(ë°©ìœ„ê°ì´ í™• ìž‘ì•„ì§€ëŠ” ì§€ì  = wrap-around) ê·¸ë•Œê¹Œì§€ ëª¨ì€
+    ì ë“¤ì„ PointCloud2 í•˜ë‚˜ë¡œ ë¬¶ì–´ì„œ ë°œí–‰.
+
+    !! CONFIRM: ì¢Œí‘œì¶•(x=ì˜¤ë¥¸ìª½,y=ì•ž,z=ìœ„) ê´€ë¡€ê°€ ìš°ë¦¬ ENU ì¢Œí‘œê³„ëž‘ ë§žëŠ”ì§€, ê·¸ë¦¬ê³ 
+       ë°©ìœ„ê° ê¸°ì¤€(0ë„ê°€ ì •ë©´ì¸ì§€)ë„ ì‹¤ì œë¡œ ë¬¼ì²´ ë†“ê³  ê²€ì¦ í•„ìš”. ì§€ê¸ˆì€ Velodyne
+       ê³µì‹ ë¬¸ì„œ ê¸°ì¤€ ê´€ë¡€ë¥¼ ê·¸ëŒ€ë¡œ ì‚¬ìš©."""
+
+    PACKET_LEN = 1206
+    BLOCK_LEN = 100
+    NUM_BLOCKS = 12
+    CHANNELS_PER_BLOCK = 32  # 16ì±„ë„ x 2 firing sequence
+    FLAG = 0xEEFF
+
+    def __init__(self, ip, port, callback):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind((ip, port))
+        self._callback = callback
+        self._points = []
+        self._prev_azimuth = None
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while not rospy.is_shutdown():
+            raw_data, _ = self.sock.recvfrom(65535)
+            if len(raw_data) != self.PACKET_LEN:
+                continue
+            self._parse_packet(raw_data)
+
+    def _parse_packet(self, data):
+        for b in range(self.NUM_BLOCKS):
+            off = b * self.BLOCK_LEN
+            flag = struct.unpack('<H', data[off:off + 2])[0]
+            if flag != self.FLAG:
+                continue
+            azimuth_raw = struct.unpack('<H', data[off + 2:off + 4])[0]
+            azimuth_deg = azimuth_raw / 100.0
+
+            # íšŒì „ í•œ ë°”í€´(360ë„) ì™„ë£Œ ê°ì§€: ë°©ìœ„ê°ì´ í¬ë‹¤ê°€ ê°‘ìžê¸° í™• ìž‘ì•„ì§€ë©´ wrap
+            if self._prev_azimuth is not None and azimuth_deg < self._prev_azimuth - 300:
+                if self._points:
+                    self._callback(self._points)
+                self._points = []
+            self._prev_azimuth = azimuth_deg
+
+            az_rad = math.radians(azimuth_deg)
+            # 32ê°œ ì±„ë„(16ì±„ë„ x 2 firing sequence) - ë‘ ì‹œí€€ìŠ¤ ëª¨ë‘ ì´ ë¸”ë¡ì˜ azimuthë¥¼
+            # ê·¸ëŒ€ë¡œ ì”€ (ì •ë°€ ë³´ê°„ ìƒëžµ, í•„ìš”ì‹œ ë‚˜ì¤‘ì— ì •ë°€í™” ê°€ëŠ¥)
+            ch_off = off + 4
+            for seq in range(2):
+                for ch in range(16):
+                    coff = ch_off + (seq * 16 + ch) * 3
+                    distance_raw = struct.unpack('<H', data[coff:coff + 2])[0]
+                    reflectivity = data[coff + 2]
+                    if distance_raw == 0:
+                        continue  # ë¬´ë°˜ì‚¬(ì¸¡ì • ì‹¤íŒ¨)
+                    distance_m = distance_raw * 0.002  # 2mm ë‹¨ìœ„
+                    vert = VLP16_VERTICAL_ANGLES_RAD[ch]
+                    x = distance_m * math.cos(vert) * math.sin(az_rad)
+                    y = distance_m * math.cos(vert) * math.cos(az_rad)
+                    z = distance_m * math.sin(vert)
+                    self._points.append((x, y, z, float(reflectivity)))
+
+
 class UdpBridge:
     def __init__(self):
         self.ctrl = CtrlCmdUDP(DEST_IP, CTRL_CMD_PORT)
+
         self.ego_pub = rospy.Publisher('/ego_status', EgoVehicleStatus, queue_size=1)
+        self.gps_pub = rospy.Publisher('/gps', GPSMessage, queue_size=1)
+        self.imu_pub = rospy.Publisher('/imu', Imu, queue_size=1)
+        self.cam_pubs = {
+            cam_id: rospy.Publisher(f'/camera{cam_id}/image_jpeg/compressed',
+                                     CompressedImage, queue_size=1)
+            for cam_id in CAMERA_PORTS
+        }
+        self.lidar_pub = rospy.Publisher('/lidar/points', PointCloud2, queue_size=1)
+
         rospy.Subscriber('/ctrl_cmd', CtrlCmd, self._on_ctrl_cmd)
+
         self.info_receiver = EgoInfoReceiverUDP("0.0.0.0", EGO_INFO_RECV_PORT, self._on_ego_info)
-        rospy.loginfo("[udp_bridge] started")
+        self.gps_receiver = GpsReceiverUDP("0.0.0.0", GPS_RECV_PORT, self._on_gps)
+        self.imu_receiver = ImuReceiverUDP("0.0.0.0", IMU_RECV_PORT, self._on_imu)
+        self.cam_receivers = {
+            cam_id: CameraReceiverUDP("0.0.0.0", port, self._make_camera_callback(cam_id))
+            for cam_id, port in CAMERA_PORTS.items()
+        }
+        self.lidar_receiver = Vlp16ReceiverUDP("0.0.0.0", LIDAR_RECV_PORT, self._on_lidar)
+
+        rospy.loginfo("[udp_bridge] started (ego_info:%d gps:%d imu:%d cameras:%s lidar:%d)",
+                      EGO_INFO_RECV_PORT, GPS_RECV_PORT, IMU_RECV_PORT,
+                      CAMERA_PORTS, LIDAR_RECV_PORT)
 
     def _on_ctrl_cmd(self, msg):
-        # 컨트롤러가 이미 라디안으로 계산해서 보낸다고 가정, 여기서 실측 보정만 적용
         deg = math.degrees(msg.front_steer)
         corrected_deg = STEER_SIGN * deg / STEER_RATIO_CORRECTION
         steer_rad = math.radians(corrected_deg)
@@ -104,6 +347,59 @@ class UdpBridge:
         out.heading = data["yaw_deg"]
         out.front_steer_angle = data["front_steer_deg"]
         self.ego_pub.publish(out)
+
+    def _on_gps(self, lat, lon, alt):
+        out = GPSMessage()
+        out.header.stamp = rospy.Time.now()
+        out.latitude = lat
+        out.longitude = lon
+        out.altitude = alt
+        out.eastOffset = 0.0
+        out.northOffset = 0.0
+        out.status = 1
+        self.gps_pub.publish(out)
+
+    def _on_imu(self, data):
+        out = Imu()
+        out.header.stamp = rospy.Time(secs=data["secs"], nsecs=data["nsecs"])
+        qw, qx, qy, qz = data["quat_wxyz"]
+        out.orientation = Quaternion(x=qx, y=qy, z=qz, w=qw)
+        out.angular_velocity = Vector3(*data["angular_velocity"])
+        out.linear_acceleration = Vector3(*data["linear_acceleration"])
+        self.imu_pub.publish(out)
+
+    def _make_camera_callback(self, cam_id):
+        def _cb(jpeg_bytes):
+            out = CompressedImage()
+            out.header.stamp = rospy.Time.now()
+            out.format = "jpeg"
+            out.data = jpeg_bytes
+            self.cam_pubs[cam_id].publish(out)
+        return _cb
+
+    def _on_lidar(self, points):
+        header = Header()
+        header.stamp = rospy.Time.now()
+        header.frame_id = "lidar"
+
+        fields = [
+            PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1),
+        ]
+        arr = np.array(points, dtype=np.float32)
+        cloud = PointCloud2()
+        cloud.header = header
+        cloud.height = 1
+        cloud.width = len(points)
+        cloud.fields = fields
+        cloud.is_bigendian = False
+        cloud.point_step = 16  # 4 floats x 4 bytes
+        cloud.row_step = cloud.point_step * len(points)
+        cloud.is_dense = True
+        cloud.data = arr.tobytes()
+        self.lidar_pub.publish(cloud)
 
 
 def main():
