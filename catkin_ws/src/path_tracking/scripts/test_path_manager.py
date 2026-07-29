@@ -144,10 +144,16 @@ def test_finish_latch():
         return False
     print('  경로 끝 도달 -> finished=True, idx=%d' % pm.current_waypoint)
 
-    # 끝점에서 진입부(실측 점프 대상 idx 909) 방향으로 30m 계속 나아간다
+    # 경로 끝과 물리적으로 가장 가까운 "먼 인덱스"를 찾는다. 완주 지점과 코스
+    # 진입 지점이 겹치는 우리 경로에서, 완주 latch 가 없으면 전역 재탐색이
+    # 붙잡을 바로 그 지점이다. 경로를 다시 딸 때마다 인덱스가 달라지므로
+    # 값을 박아두지 않고 매번 찾는다.
     ex, ey = path[n - 1].x, path[n - 1].y
-    tx, ty = path[909].x, path[909].y
+    tail = 200                      # 끝 근처는 이웃이라 당연히 가까우므로 제외
+    j = min(range(n - tail), key=lambda k: hypot(path[k].x - ex, path[k].y - ey))
+    tx, ty = path[j].x, path[j].y
     d = hypot(tx - ex, ty - ey)
+    print('  경로 끝과 가장 가까운 먼 인덱스 = %d (%.1fm 떨어짐)' % (j, d))
     ux, uy = (tx - ex) / d, (ty - ey) / d
 
     worst = 0
@@ -155,7 +161,7 @@ def test_finish_latch():
         pm.get_local_path(VehicleState(ex + ux * step, ey + uy * step, 0, 0))
         worst = max(worst, abs(pm.current_waypoint - (n - 1)))
 
-    print('  끝점에서 진입부 방향 30m 진행 (실측 점프 지점까지 %.0fm)' % d)
+    print('  끝점에서 그 방향으로 30m 진행')
     print('  그동안 인덱스가 끝(%d)에서 최대 %d칸 벗어남' % (n - 1, worst))
 
     ok = (worst == 0) and pm.finished
