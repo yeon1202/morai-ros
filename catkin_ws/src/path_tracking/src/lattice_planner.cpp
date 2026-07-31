@@ -6,7 +6,7 @@
 // 발행:  /lattice_path       (nav_msgs/Path)     선택된 회피경로 -> 제어가 추종
 //        /lattice_candidates (MarkerArray)       후보 전체 시각화 (초록=선택 빨강=충돌 회색=여유)
 //
-// 동작: 장애물이 경로 위에 있으면 좌우 후보경로 생성 -> 충돌검사 -> 최소비용 선택.
+// 동작: 장애물이 경로 위에 있으면 차선 단위 후보경로 생성 -> 충돌검사 -> 최소비용 선택.
 //       없으면 기준경로 그대로 통과.
 #include <ros/ros.h>
 #include <nav_msgs/Path.h>
@@ -18,6 +18,18 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+
+// 차로 폭 [m]. 2026-07-31 시뮬 실측값이다.
+//   직선구간에서 차선 두 줄의 좌표 (72.85,-55.36) / (69.34,-55.44) 를 찍어
+//   도로 수직 성분을 계산했다. 그 지점 곡률반경이 39928m(사실상 완전 직선)라
+//   baseline 을 어떻게 잡아도 3.510m 로 동일했다(편차 0.001m). 종방향으로
+//   어긋난 양도 0.060m 뿐이라 거의 순수 횡이동이었다.
+//   한국 고속도로 표준 3.5m 와도 맞는다.
+//
+// 클래스 멤버가 아니라 파일 스코프에 두는 이유는 acc_planner.cpp 의 kTimerHz 와
+// 같다. 이 패키지는 C++ 표준을 명시하지 않아 gnu++14 로 빌드되는데, 클래스 안의
+// static constexpr 멤버는 ODR-use 시 클래스 밖 정의가 따로 필요할 수 있다.
+static constexpr double LANE_WIDTH = 3.51;
 
 class LatticePlanner
 {
@@ -36,8 +48,61 @@ public:
 
 private:
   // ---- 파라미터 ----
-  const std::vector<double> LANE_OFFSET  = {-3.0, -1.75, -1.0, 1.0, 1.75, 3.0}; // 횡 후보 offset [m]
-  const std::vector<double> BASE_WEIGHT  = {3, 2, 1, 1, 2, 3};                   // 중앙 선호(안쪽 저비용)
+  // ---- 횡 후보 offset [m] ----
+  //
+  // 편도 2차선 도로에서 선택지는 "그대로" 아니면 "옆 차선" 둘뿐이다. 그래서
+  // 연속 오프셋을 샘플링하지 않고 차선 단위로 이산화한다.
+  //
+  // 예전에는 {-3.0, -1.75, -1.0, 1.0, 1.75, 3.0} 에 가중치 {3,2,1,1,2,3} 을 썼는데
+  // 세 가지가 잘못이었다.
+  //
+  //   1) 0 후보가 없었다. objectOnPath() 가 참이 되기만 하면 무조건 1m 이상
+  //      움직였다. 장애물이 경로 옆에 살짝 걸쳐 그냥 차선을 유지해도 안전한
+  //      경우에도 이유 없이 옆으로 나갔다.
+  //
+  //   2) +-1.0 과 +-1.75 는 어떤 장애물도 피하지 못한다. 충돌 판정 임계가
+  //      장애물반경 + CAR_HALF_WIDTH(0.95) + SAFE_MARGIN(0.5) = 반경 + 1.45m 라,
+  //      1.75m 를 비켜도 반경 0.3m 짜리 라바콘조차 못 넘긴다. 회피 능력이 0인
+  //      후보였다.
+  //
+  //   3) 그런데 그 쓸모없는 후보들이 가장 쌌다(가중치 1, 2). 차로 3.51m 에
+  //      차폭 1.892m 라 차선 내 여유가 편도 (3.51-1.892)/2 = 0.809m 뿐이어서
+  //      +-1.0 은 0.19m, +-1.75 는 0.94m 를 침범한다. 대회 규정상 실선 침범은
+  //      3초당 5초 페널티다. 아무것도 못 피하면서 페널티만 먹는 셈이었다.
+  //
+  // 유일하게 의미 있는 회피는 옆 차선으로 통째로 옮기는 것이고, 그 값이
+  // LANE_WIDTH 다. 예전의 +-3.0 은 방향은 맞았지만 옆 차선 중심에서 0.51m
+  // 어긋나 있었다.
+  //
+  // 부호: local 프레임이 x=진행방향, y=좌측(+) 이므로 음수 offset 이 우측이다.
+  //
+  // 실제 회피 미션은 교차로 한복판을 막은 상자다. 교차로 안에는 차선이 없으므로
+  // (정지선에서 끊기고 건너편에서 다시 시작한다) 차로 단위로 움직일 이유가 없다.
+  // 필요한 것은 상자를 비켜갈 만큼이고, 그 값은
+  //   상자 절반폭 + CAR_HALF_WIDTH(0.95) + SAFE_MARGIN(0.5)
+  // 이라 상자가 1~2m 폭이면 1.95~2.45m 다. 그래서 중간 오프셋을 촘촘히 두고
+  // 비용을 |offset| 에 비례시켜 "충돌을 면하는 가장 작은 회피" 가 뽑히게 한다.
+  //
+  // 3차선 이상 구간이 확인되면 -2*LANE_WIDTH 를 추가한다.
+  const std::vector<double> LANE_OFFSET  = {0.0, -1.0, -2.0, -3.0, -LANE_WIDTH, LANE_WIDTH};
+
+  // 비용.
+  //
+  // 제자리(0)를 압도적으로 싸게 둔다. 옆 차로가 비어 있어도 굳이 나가지 않고,
+  // 원래 차로가 막혔을 때만 움직인다.
+  //
+  // 좌우가 대칭이 아니다. 정적장애물 구간과 보행자 구간 모두 자차는 1차로
+  // (맨 왼쪽 차로)를 달리고 왼쪽은 황색 중앙선이다. 왼쪽으로 피하면 중앙선
+  // 침범이고 반대편 차로로 들어가는 것이라 사고 위험도 크다. 오른쪽에는
+  // 2차로가 있으므로 회피는 오른쪽으로 간다.
+  //
+  // 왼쪽을 아예 빼지 않고 큰 비용(20)으로 남겨둔 이유는, 오른쪽까지 막혔을 때
+  // 마지막 수단으로라도 쓸 수 있게 하기 위해서다. 충돌 벌점이 100 이므로
+  // "오른쪽이 전부 막혔고 왼쪽은 뚫렸다" 일 때만 왼쪽이 선택된다.
+  //
+  // 우측 비용을 |offset| 에 비례시켜 충돌을 면하는 가장 작은 회피가 뽑히게 한다.
+  //                                      0    -1.0  -2.0  -3.0  -3.51  +3.51
+  const std::vector<double> BASE_WEIGHT  = {0.0, 1.0, 2.0, 3.0,  4.0,   20.0};
   const double CAR_HALF_WIDTH = 0.95;   // Ioniq5 폭 1.892 / 2
   const double SAFE_MARGIN    = 0.5;    // 안전 여유
   const double COLLISION_PENALTY = 100.0;
@@ -58,8 +123,17 @@ private:
   // 장애물 하나 = 위치 + 반경(size 반영)
   struct Obs { double x, y, r; };
 
-  // npc + 보행자 + 정적장애물 전부 모음 
-  std::vector<Obs> gatherObstacles()
+  // 장애물 수집.
+  //
+  // with_pedestrian 을 나눈 이유:
+  //   보행자는 "피하는" 대상이 아니라 "서는" 대상이다. 미션이 횡단보도로
+  //   신호를 위반하며 뛰어드는 사람이라, 옆으로 꺾으면 사람이 뛰어든 쪽으로
+  //   들어갈 수도 있고 반대 차로로 나갈 수도 있다. 정답은 급정지이고 그건
+  //   behavior FSM / ACC 몫이다.
+  //   그래서 보행자는 회피를 촉발하지 않는다(objectOnPath 에서 제외).
+  //   다만 다른 이유로 이미 회피 중이라면 보행자를 뚫고 가는 후보를 고르면
+  //   안 되므로, 후보 충돌 검사에는 포함한다.
+  std::vector<Obs> gatherObstacles(bool with_pedestrian)
   {
     std::vector<Obs> v;
     auto add = [&](const std::vector<morai_msgs::ObjectStatus>& list) {
@@ -70,8 +144,8 @@ private:
       }
     };
     add(objs_.npc_list);
-    add(objs_.pedestrian_list);
     add(objs_.obstacle_list);
+    if (with_pedestrian) add(objs_.pedestrian_list);
     return v;
   }
 
@@ -86,7 +160,9 @@ private:
     return false;
   }
 
-  // 후보 경로 6개 생성 (기준경로 시작점 기준 local 프레임 -> 3차곡선 -> map 복귀)
+  // 후보 경로 생성 (기준경로 시작점 기준 local 프레임 -> 3차곡선 -> map 복귀)
+  // offset 0 후보도 의미가 있다. 3차곡선이 차의 현재 횡위치(egoy)에서 기준경로로
+  // 부드럽게 복귀시키므로, "그대로 간다" 가 곧 "제 차선으로 돌아온다" 가 된다.
   std::vector<nav_msgs::Path> generateCandidates()
   {
     std::vector<nav_msgs::Path> out;
@@ -177,21 +253,34 @@ private:
     blocked.assign(cands.size(), false);
 
     for (size_t i = 0; i < cands.size(); ++i) {
-      for (const auto& p : cands[i].poses)
+      // 벌점은 후보당 한 번만 준다.
+      //
+      // 예전에는 break 가 안쪽(장애물) 루프만 끊고 바깥(점) 루프는 계속 돌아서,
+      // 충돌한 waypoint 개수만큼 +100 이 누적됐다. 장애물 하나인데 가중치가
+      // 900, 800, 600 씩 붙었다. 그러면 "충돌하느냐" 가 아니라 "몇 점이나
+      // 충돌하느냐" 로 순위가 매겨지고, 중앙선 회피 같은 기본 비용(20)이
+      // 수백 점의 벌점 앞에서 무의미해진다.
+      bool hit = false;
+      for (const auto& p : cands[i].poses) {
         for (const auto& o : obs) {
           double d = std::hypot(p.pose.position.x - o.x, p.pose.position.y - o.y);
           if (d < o.r + CAR_HALF_WIDTH + SAFE_MARGIN) {  // size 반영 충돌
-            weight[i] += COLLISION_PENALTY;
-            blocked[i] = true;
+            hit = true;
             break;
           }
         }
+        if (hit) break;
+      }
+      if (hit) {
+        weight[i] += COLLISION_PENALTY;
+        blocked[i] = true;
+      }
     }
     int best = std::min_element(weight.begin(), weight.end()) - weight.begin();
 
     // 전부 막힘 처리 (리뷰 #8): 최소도 충돌이면 경고 (정지는 behavior/ACC 몫)
     if (blocked[best])
-      ROS_WARN_THROTTLE(1.0, "[lattice] 모든 후보 충돌 - behavior/ACC 정지 필요");
+      ROS_WARN_THROTTLE(1.0, "[lattice] all candidates blocked - behavior/ACC must stop");
     return best;
   }
 
@@ -227,10 +316,11 @@ private:
   {
     if (!(has_path_ && has_ego_ && has_obj_)) return;
 
-    std::vector<Obs> obs = gatherObstacles();
+    // 회피를 촉발할 대상: NPC + 정적장애물 (보행자 제외 - 보행자는 정지 대상)
+    std::vector<Obs> trigger_obs = gatherObstacles(false);
 
-    // 장애물 없으면 기준경로 그대로 (lattice 안 돌림)
-    if (obs.empty() || !objectOnPath(obs)) {
+    // 회피할 이유가 없으면 기준경로 그대로 (lattice 안 돌림)
+    if (trigger_obs.empty() || !objectOnPath(trigger_obs)) {
       pub_path_.publish(local_path_);
       return;
     }
@@ -238,6 +328,9 @@ private:
     std::vector<nav_msgs::Path> cands = generateCandidates();
     if (cands.empty()) { pub_path_.publish(local_path_); return; }
 
+    // 후보 충돌 검사에는 보행자도 포함한다. 이미 회피 중이라면 보행자를 뚫고
+    // 가는 후보를 고르면 안 된다.
+    std::vector<Obs> obs = gatherObstacles(true);
     std::vector<bool> blocked;
     int best = selectLane(cands, obs, blocked);
 
