@@ -127,9 +127,32 @@ class Harness:
             print('    %2d   %+8.2f m   %s   (x=%.1f 에서 y=%+.3f)%s'
                   % (m.id, off, verdict, near.x, near.y, extra))
 
-    def run_case(self, name, obs, expect, tol=0.25, peds=()):
+    def lateral_g(self, poses, v_kmh):
+        """고른 경로의 최대 횡가속도를 G 로 환산한다.
+
+        폴리라인의 곡률을 약 2m 간격 세 점의 외접원으로 잰다.
+        (외접원 반지름 R = abc / (2*|외적|). abc/|외적| 로 쓰면 2R 이 나온다.)
+        횡가속도 = v^2 / R.
+        """
+        pts = [(q.pose.position.x, q.pose.position.y) for q in poses]
+        if len(pts) < 9:
+            return 0.0
+        v = v_kmh / 3.6
+        worst = 0.0
+        step = 4                      # 0.5m 간격 * 4 = 2m
+        for i in range(step, len(pts) - step):
+            (x1, y1), (x2, y2), (x3, y3) = pts[i-step], pts[i], pts[i+step]
+            a = hypot(x2-x1, y2-y1); b = hypot(x3-x2, y3-y2); c = hypot(x3-x1, y3-y1)
+            cr = abs((x2-x1)*(y3-y1) - (y2-y1)*(x3-x1))
+            if cr < 1e-9 or a*b*c < 1e-12:
+                continue
+            R = a*b*c / (2*cr)
+            worst = max(worst, v*v / R)
+        return worst / 9.8
+
+    def run_case(self, name, obs, expect, tol=0.25, peds=(), speed=20.0, max_g=None):
         """obs 를 놓고 lattice 가 고른 경로의 최대 횡변위를 잰다."""
-        path, e, o = straight_path(), ego(), objects(obs, peds)
+        path, e, o = straight_path(), ego(speed), objects(obs, peds)
         self._obs = list(obs)
         self.got = None
 
@@ -152,8 +175,14 @@ class Harness:
         ys = [p.pose.position.y for p in self.got.poses]
         far = max(ys, key=abs)
         ok = abs(abs(far) - abs(expect)) <= tol and (expect == 0 or far * expect > 0)
-        print('  %-34s 선택 %+6.2f m   기대 %+6.2f m   %s'
-              % (name, far, expect, 'OK' if ok else '** 불일치 **'))
+        gtxt = ''
+        if max_g is not None:
+            g = self.lateral_g(self.got.poses, speed)
+            gtxt = '  횡가속 %.2fG(<=%.2f)' % (g, max_g)
+            if g > max_g:
+                ok = False
+        print('  %-30s 선택 %+6.2f m  기대 %+6.2f m  %s%s'
+              % (name, far, expect, 'OK' if ok else '** 불일치 **', gtxt))
         if not ok:
             self.dump_candidates()
         return ok
@@ -178,14 +207,15 @@ def main():
     #   20km/h 에서 전이 길이 xf=24m 이므로 x=15 에서의 실제 횡변위는 offset*0.684 다.
     #     -2.0 -> 1.37m (임계 미달, 충돌)   -3.0 -> 2.05m (통과)
     #   그래서 충돌을 면하는 가장 작은 회피는 -3.0 이다.
-    results.append(h.run_case('작은 상자 r=0.5 -> 최소 회피', [(15.0, 0.0, 1.0)], -3.0))
+    results.append(h.run_case('작은 상자 r=0.5 -> 최소 회피', [(15.0, 0.0, 1.0)], -2.0,
+                              max_g=0.35))
 
     # 큰 상자(r=1.0, 임계 2.45m) -> 어떤 후보도 못 피한다.
     #   최대 후보 -3.51 조차 x=14.5 에서 최소거리가 2.35m 로 임계에 못 미친다.
     #   전부 막히면 가장 싼 후보(제자리)를 내보내고 경고를 띄운다. 실제 정지는
     #   behavior/ACC 몫이다. 즉 이 상황은 lattice 가 아니라 종방향이 풀어야 한다.
-    results.append(h.run_case('큰 상자 r=1.0 -> 전부 막힘, 제자리+경고',
-                              [(15.0, 0.0, 2.0)], 0.0))
+    results.append(h.run_case('큰 상자 r=1.0 -> 최소 회피', [(15.0, 0.0, 2.0)], -3.0,
+                              max_g=0.35))
 
     # 우측이 전부 막히면 마지막 수단으로 좌측(중앙선 너머)을 쓴다.
     #   피할 수 있는 크기(r=0.5)여야 의미가 있다. 경로 위 상자 하나로 0/-1/-2 를
@@ -196,6 +226,21 @@ def main():
     # 보행자는 회피 대상이 아니다. 경로 한복판에 있어도 꺾지 않는다(정지는 FSM 몫).
     results.append(h.run_case('보행자 경로 위 -> 꺾지 않음', [], 0.0,
                               peds=[(15.0, 0.0, 1.0)]))
+
+    # --- 전이 길이가 속도 비례인지 ---
+    #
+    # 예전에는 하한 20점(약 24m) 이 50km/h 이하를 전부 덮어써서 저속에서 너무
+    # 느긋했다. 15m 앞 큰 상자(r=1.0, 임계 2.45m)에 닿았을 때 2.40m 밖에 못
+    # 비켜나 전부 막힘 처리됐다. 시간 기준(2.68초)으로 바꾸면 20km/h 에서
+    # 전이 길이가 14.9m 라 같은 상자를 피할 수 있어야 한다.
+    #   -3.0 으로 이미 3.00m 가 확보되므로(임계 2.45m) 그보다 큰 회피는 불필요하다.
+    results.append(h.run_case('저속 20km/h 큰 상자 -> 회피 가능',
+                              [(15.0, 0.0, 2.0)], -3.0, speed=20.0, max_g=0.35))
+
+    # 고속에서는 반대로 전이 길이가 길어져 횡가속도가 한계 안에 들어와야 한다.
+    # 예전에는 26m 로 짧아 0.72G 를 요구했다(우리 한계 0.3G 의 2.4배).
+    results.append(h.run_case('고속 55km/h 큰 상자 -> 0.3G 이내',
+                              [(35.0, 0.0, 2.0)], -3.0, speed=55.0, max_g=0.35))
 
     # 트리거는 되지만 후보 범위 밖에 있는 장애물.
     #   objectOnPath() 는 local_path 전체(140점, 약 84m)를 훑는데, 후보 경로는

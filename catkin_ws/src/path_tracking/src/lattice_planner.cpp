@@ -108,6 +108,17 @@ private:
   const double COLLISION_PENALTY = 100.0;
   const double X_INTERVAL = 0.5;        // 후보경로 점 간격 [m]
 
+  // 차선 변경 중 허용할 횡가속도 [m/s^2]. 0.3G.
+  // ACC 의 곡률 기반 속도 제한(lat_accel_limit)과 같은 값이다. 타이어 한계는
+  // 마른 아스팔트에서 약 1G 이지만, 그 3분의 1로 승차감·안전 여유를 둔다.
+  const double LAT_ACCEL_LIMIT = 2.94;
+
+  // 정지·극저속에서의 전이 길이 하한 [m].
+  // 속도 0 이면 v*T 가 0 이 되어 후보가 생기지 않는다. 회피가 아예 작동하지
+  // 않는 것을 막는 최소값이다. 예전 하한(24m)과 달리 주행 영역을 침범하지 않는다
+  // (8m 를 넘는 시점이 약 11km/h 이므로 그 위로는 전부 시간 기준이 지배한다).
+  const double MIN_TRANSITION = 8.0;
+
   ros::Subscriber sub_path_, sub_ego_, sub_obj_;
   ros::Publisher pub_path_, pub_cand_;
   ros::Timer timer_;
@@ -171,10 +182,41 @@ private:
     // /ego_status 의 velocity 는 MORAI UDP 원본이라 이미 km/h 다(브릿지가 변환 안 함).
     // 예전엔 이걸 m/s 로 착각하고 3.6을 또 곱해서 전방주시거리가 3.6배로 부풀어 있었다.
     double v_kmh = std::hypot(ego_.velocity.x, ego_.velocity.y);
-    int look = static_cast<int>(v_kmh * 0.2 * 2);
-    if (look < 20) look = 20;
-    int end_idx = std::min(look * 2, n - 1);         // 경로 끝 IndexError 방지 (리뷰 #7)
-    if (end_idx < 2) return out;
+    double v_mps = v_kmh / 3.6;
+
+    // 전이 길이(옆으로 옮기는 데 앞으로 쓰는 거리)는 "거리" 가 아니라 "시간" 으로 정한다.
+    //
+    // 예전에는 waypoint 개수로 정했다:
+    //     look = v_kmh*0.4;  if (look < 20) look = 20;  end_idx = look*2;
+    // 하한 20 이 50km/h 이하를 전부 덮어써서, 주행의 절반이 40점(약 24m)에 고정됐다.
+    // 게다가 개수라서 waypoint 간격이 바뀌면 거동이 조용히 달라졌다.
+    //
+    // 거리를 고정하면 시간이 속도에 따라 널뛴다. 24m 를 20km/h 로 지나면 4.3초,
+    // 55km/h 로 지나면 1.6초다. 그만큼 횡가속도도 0.12G ~ 0.72G 로 널뛰었다.
+    //   - 저속: 너무 느긋해 15m 앞 상자에 닿았을 때 2.40m 밖에 못 비켜났다(2.45m 필요).
+    //   - 고속: 0.72G 를 요구했다. 우리 한계 0.3G 의 2.4배라 차가 못 따라가고 밀려난다.
+    //
+    // 3차곡선의 최대 곡률은 6*D/L^2 이고 횡가속도는 v^2 를 곱한 값이다. 이를
+    // LAT_ACCEL_LIMIT 이하로 두면 L = v * sqrt(6*D/a) 가 되어 속도가 상쇄되고,
+    // 남는 것은 "시간" 뿐이다. 그래서 속도와 무관하게 횡가속도가 일정해진다.
+    //   D=3.51m, a=2.94 -> T = 2.68초 (20km/h 에서 15m, 55km/h 에서 41m)
+    double d_max = 0.0;
+    for (double off : LANE_OFFSET) d_max = std::max(d_max, std::fabs(off));
+    const double T = std::sqrt(6.0 * d_max / LAT_ACCEL_LIMIT);
+    double xf_want = std::max(v_mps * T, MIN_TRANSITION);
+
+    // 누적 거리로 끝점 인덱스를 찾는다. 개수가 아니라 거리로 재므로 waypoint
+    // 간격이 달라져도 거동이 바뀌지 않는다.
+    int end_idx = 1;
+    double acc_len = 0.0;
+    for (int i = 1; i < n; ++i) {
+      acc_len += std::hypot(
+          local_path_.poses[i].pose.position.x - local_path_.poses[i-1].pose.position.x,
+          local_path_.poses[i].pose.position.y - local_path_.poses[i-1].pose.position.y);
+      end_idx = i;
+      if (acc_len >= xf_want) break;
+    }
+    if (end_idx < 2) return out;                     // 경로가 너무 짧다
 
     // 좌표변환: 시작점 + 진행방향 theta
     double sx = local_path_.poses[0].pose.position.x;
@@ -233,12 +275,28 @@ private:
       //   장애물 때문에 회피 판단이 마비된다. 먼 장애물 대응은 ACC/behavior 몫.
       //   여기 남기는 길이는 pure_pursuit 이 전방주시점(최대 20m)을 찾을 만큼이면 된다.
       //
-      // ※ 알려진 이슈: 이 tail 은 offset 을 유지하지 않고 기준경로 원본 점을 그대로
-      //   붙이므로, S커브 끝(offset)과 tail(offset 0) 사이에 횡방향 불연속이 생긴다.
-      //   짧은 회피에선 pure_pursuit 이 뭉개서 무해하다. docs/30-lattice_design.md §3.4 참고.
+      // tail 도 offset 을 유지한다(경로 법선 방향으로 밀어서 붙인다).
+      //
+      //   예전에는 기준경로 원본 점을 그대로 붙여서, S커브 끝(offset)과
+      //   tail(offset 0) 사이에 횡방향 불연속이 생겼다. 전이 길이가 24m 로 길던
+      //   시절에는 tail 이 장애물보다 뒤쪽에서 시작해 무해했지만, 전이 길이를
+      //   속도 비례로 바꾸면서 저속에서 15m 로 짧아졌다. 그러면 tail 이 장애물
+      //   바로 위에서 시작해, 애써 비켜난 경로가 그 자리에서 원래 차선으로
+      //   되돌아가 버린다. 즉 회피가 무효가 된다.
       const int TAIL_EXTEND = 12;
       for (int i = end_idx; i < n && i < end_idx + TAIL_EXTEND; ++i) {
-        cand.poses.push_back(local_path_.poses[i]);
+        // 경로 접선 -> 좌측 법선. 법선 방향으로 off 만큼 민다.
+        int a = (i > 0) ? i - 1 : i;
+        int b = (i + 1 < n) ? i + 1 : i;
+        double tx = local_path_.poses[b].pose.position.x - local_path_.poses[a].pose.position.x;
+        double ty = local_path_.poses[b].pose.position.y - local_path_.poses[a].pose.position.y;
+        double tl = std::hypot(tx, ty);
+        geometry_msgs::PoseStamped tp = local_path_.poses[i];
+        if (tl > 1e-9) {
+          tp.pose.position.x += (-ty / tl) * off;
+          tp.pose.position.y += ( tx / tl) * off;
+        }
+        cand.poses.push_back(tp);
       }
       out.push_back(cand);
     }
