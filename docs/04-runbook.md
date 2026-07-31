@@ -129,7 +129,15 @@ DEV '... && rosrun path_tracking diag_steer.py'
 
 # 목표속도를 직접 관측 (노드 로그와 독립적인 증거)
 DEV '... && rostopic echo -p /target_velocity'
+
+# lattice 회피 선택 검증 (시뮬·주행 불필요, roscore 만 있으면 된다)
+DEV '... && rosrun path_tracking lattice_planner &'
+DEV '... && rosrun path_tracking test_lattice.py'
 ```
+
+`test_lattice.py` 는 가짜 경로·자차·장애물을 쏘고 lattice 가 어느 후보를 골랐는지와
+그 경로의 최대 횡가속도를 잰다. 후보 집합이나 전이 길이를 건드린 뒤에는 이걸 먼저
+돌린다. 9케이스가 모두 PASS 여야 한다.
 
 경로 관련 오프라인 도구 (ROS 불필요, 호스트에서 바로 실행 가능):
 
@@ -281,3 +289,6 @@ DEV '... && rosrun path_tracking lap_logger.py _out:=/tmp/lap.csv _start_idx:=97
 | `MAX_STEER` 0.65 rad | `path_tracker.py` | 차량 한계는 0.698(40도). 시뮬이 잘라내는 지점에 명령을 걸치지 않도록 여유를 둔다 |
 | `accel_rate_limit` 1.0 | `acc.launch` arg | 유턴 탈출 실측 가속도가 2.4 m/s^2 라 그 이상은 효과가 없다. 진동 폭 1.22 -> 0.21m 로 확인됨 |
 | `LFD_GAIN` 0.5 | `path_tracker.py` | 경로에 기록된 차선변경(횡 3.8m 를 44m 에 걸쳐 이동)에서 0.7 이면 S자를 가로지른다 |
+| 차로 폭 **3.51m** | `lattice_planner.cpp` `LANE_WIDTH` | 시뮬 실측. 직선구간에서 차선 두 줄 좌표를 찍어 도로 수직 성분으로 계산했다(편차 0.001m) |
+| 전이 시간 **2.68초** | `lattice_planner.cpp` (`LAT_ACCEL_LIMIT` 에서 유도) | 차로 하나를 0.3G 안에서 옮기는 최단 시간. 거리로 고정하면 속도에 따라 횡가속도가 0.12~0.72G 로 널뛴다 |
+| `LAT_ACCEL_LIMIT` 2.94 | `lattice_planner.cpp` | 0.3G. ACC 곡률 제한과 같은 값. 타이어 한계(약 1G)가 아니라 승차감·안전 기준 |

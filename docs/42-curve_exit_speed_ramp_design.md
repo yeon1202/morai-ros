@@ -254,7 +254,7 @@ dt = now - prev_time_
 ## 7. 범위 밖
 
 - 유턴 정점의 조향 포화로 인한 최악 CTE 1.79m. 아래 7.1 참고.
-- lattice tail 불연속(`30-lattice_design.md` 3.4 / 7 참고).
+- ~~lattice tail 불연속~~ — 2026-07-31 해결(`30-lattice_design.md` 3.5).
 
 ### 7.1 MIN_LFD 스윕 — 4.0 이 최적으로 확정 (2026-07-29)
 
