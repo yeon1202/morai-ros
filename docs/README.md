@@ -51,7 +51,7 @@
 | 문서 | 내용 |
 |---|---|
 | 50-behavior_fsm_design.md | FSM 전체 설계와 우선순위 중재. **미작성** |
-| [51-traffic_light_brief.md](51-traffic_light_brief.md) | 신호등 모듈 인수인계 브리프. local path 설명 + 접근 아이디어 |
+| [51-traffic_light_brief.md](51-traffic_light_brief.md) | **planning 인수인계 브리프.** 경로·local path·lattice·ACC 를 어떻게 구성했는지, 세팅과 함정 |
 
 ## 다음 번호대 (예정)
 
