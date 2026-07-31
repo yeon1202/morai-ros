@@ -46,9 +46,16 @@
 | [42-curve_exit_speed_ramp_design.md](42-curve_exit_speed_ramp_design.md) | 커브 탈출 시 목표속도 상승률 제한 설계 |
 | [43-curve_exit_speed_ramp_plan.md](43-curve_exit_speed_ramp_plan.md) | 위 설계의 구현 계획(Task 단위) |
 
+## 5x — behavior FSM
+
+| 문서 | 내용 |
+|---|---|
+| 50-behavior_fsm_design.md | FSM 전체 설계와 우선순위 중재. **미작성** |
+| [51-traffic_light_brief.md](51-traffic_light_brief.md) | 신호등 모듈 인수인계 브리프. local path 설명 + 접근 아이디어 |
+
 ## 다음 번호대 (예정)
 
 | 번호 | 예정 문서 |
 |---|---|
-| 5x | behavior FSM (신호 준수, 끼어들기, 보행자 급정지) |
+| 5x | 끼어들기, 보행자 급정지 |
 | 6x | 통합·완주 리허설 |
