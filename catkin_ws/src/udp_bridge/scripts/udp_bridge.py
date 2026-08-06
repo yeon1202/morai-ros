@@ -28,7 +28,7 @@ import rospy
 from morai_msgs.msg import CtrlCmd, EgoVehicleStatus, GPSMessage, CollisionData, ObjectStatus
 from sensor_msgs.msg import Imu, CompressedImage, PointCloud2, PointField
 from geometry_msgs.msg import Vector3, Quaternion
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 
 DEST_IP = "127.0.0.1"
 CTRL_CMD_PORT = 9093          # MORAI Network Settingsì˜ Host PORTëž‘ ì¼ì¹˜í•´ì•¼ í•¨
@@ -96,10 +96,23 @@ class EgoInfoReceiverUDP:
             vel_x, vel_y, vel_z = struct.unpack('fff', raw_data[101:113])
             ang_vel_x, ang_vel_y, ang_vel_z = struct.unpack('fff', raw_data[113:125])
             front_steer = struct.unpack('f', raw_data[137:141])[0]
+            # MGeo 링크 ID (12바이트 ASCII, 예: "A2256W000748").
+            #
+            # 규정 허용 채널인 9109(181B)에도 실려 온다 - 2026-08-06 실측 확인.
+            # 시뮬이 "지금 이 링크 위에 있다" 를 직접 알려주므로 최근접 탐색이 필요 없다.
+            #
+            # 지금은 위치가 정확해서(개발 중 9111 = ground truth) 최근접 탐색으로도
+            # 충분하다. 값어치는 나중에 나온다 -
+            #   - 대회에선 위치를 GPS+IMU 로 만들어야 하고 음영구간(118m)에선 오차가 자란다
+            #   - 경로 위 40지점 표본에서 1순위/2순위 링크 거리차 중앙값은 3.50m(차로폭)라
+            #     대부분 안전하지만, 5/40 지점은 1m 미만이다(교차로·분기점). 하필 신호등과
+            #     합류가 있는 곳이라 위치 오차 0.5m 만으로도 다른 링크를 고를 수 있다.
+            # link_id 는 그때도 흔들리지 않는다.
+            link_id = raw_data[141:153].decode(errors="ignore").rstrip('\x00').strip()
             return {
                 "gear": gear, "pos": (pos_x, pos_y, pos_z), "yaw_deg": yaw,
                 "vel": (vel_x, vel_y, vel_z), "ang_vel_z_deg_s": ang_vel_z,
-                "front_steer_deg": front_steer,
+                "front_steer_deg": front_steer, "link_id": link_id,
             }
         except (struct.error, IndexError):
             return None
@@ -391,6 +404,7 @@ class UdpBridge:
         }
         self.lidar_pub = rospy.Publisher('/lidar/points', PointCloud2, queue_size=1)
         self.collision_pub = rospy.Publisher('/CollisionData', CollisionData, queue_size=10)
+        self.link_pub = rospy.Publisher('/ego_link_id', String, queue_size=1)
 
         rospy.Subscriber('/ctrl_cmd', CtrlCmd, self._on_ctrl_cmd)
 
@@ -452,6 +466,12 @@ class UdpBridge:
         out.heading = data["yaw_deg"]
         out.front_steer_angle = data["front_steer_deg"]
         self.ego_pub.publish(out)
+
+        # MGeo 링크 ID. EgoVehicleStatus 에 담을 자리가 없어 별도 토픽으로 낸다.
+        # 소비자는 link_set.json 에서 max_speed / can_move_*_lane / related_signal 등을
+        # 바로 조회할 수 있다.
+        if data.get("link_id"):
+            self.link_pub.publish(String(data=data["link_id"]))
 
     def _on_gps(self, lat, lon, alt):
         out = GPSMessage()
