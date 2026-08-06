@@ -31,6 +31,33 @@ cd ~/morai-ros && docker compose down && docker compose up -d
 다만 컨테이너 안 `/tmp` 의 임시 스크립트는 날아간다(그래서 비상정지는
 `/tmp` 가 아니라 `scripts/estop.py` 에 있다).
 
+## 0.5 시나리오 로드 — `_dev_ctrl2` 를 쓴다
+
+```
+SaveFile/Scenario/R_KR_PR_K-city_2025/
+  2026_molit_comp_sample_scene.json   대회 배포 원본. 건드리지 않는다
+  2026_molit_comp_dev_ctrl2.json      ← 개발용. 이걸 로드한다
+```
+
+**원본을 로드하면 차가 즉시 자동주행으로 출발한다.** `currentControlMode: 1` 로
+저장돼 있어서 MORAI 내장 AI 가 링크를 따라 몰아버린다. UI 에서 모드를 바꾸려
+해도 그 사이에 이미 멀리 가 있다.
+
+`_dev_ctrl2` 는 그 값만 `2`(외부 제어)로 바꾼 사본이다. 로드해도 차가 서 있고,
+우리 `/ctrl_cmd` 를 받아야 움직인다.
+
+| `currentControlMode` | 뜻 |
+|---|---|
+| 1 | MORAI 자동주행 (우리 `/ctrl_cmd` 무시됨) |
+| **2** | **외부 제어 (Ego Ctrl Cmd)** ← 우리가 쓸 것 |
+
+**자동주행 모드에서는 planning 검증이 아예 불가능하다.** 차가 우리 판단이 아니라
+MORAI 판단으로 움직이기 때문이다.
+
+시나리오에 들어있는 것: EGO 스폰(경로 0.5m 지점), 정적장애물(328.9m),
+보행자(459.8m, activeDistance 15m), NPC 9대, GPS 음영구역(1939.7m, 118m),
+신호등 16개. 자세한 값은 `50-behavior_fsm_design.md` 와 메모 참조.
+
 ## 1. 브릿지 실행
 
 ```bash
