@@ -25,7 +25,7 @@ import struct
 import threading
 import numpy as np
 import rospy
-from morai_msgs.msg import CtrlCmd, EgoVehicleStatus, GPSMessage
+from morai_msgs.msg import CtrlCmd, EgoVehicleStatus, GPSMessage, CollisionData, ObjectStatus
 from sensor_msgs.msg import Imu, CompressedImage, PointCloud2, PointField
 from geometry_msgs.msg import Vector3, Quaternion
 from std_msgs.msg import Header
@@ -37,6 +37,10 @@ GPS_RECV_PORT = 2503
 IMU_RECV_PORT = 2505
 CAMERA_PORTS = {1: 2507, 2: 2509, 3: 2511}
 LIDAR_RECV_PORT = 2501
+# CollisionData 수신 포트. 규정 허용 채널이라 써도 된다.
+# MORAI Network Settings 의 CollisionData 항목 Destination PORT 와 맞출 것.
+# 0 으로 두면 이 기능을 끈다(항목을 안 켰을 때 포트만 점유하지 않도록).
+COLLISION_RECV_PORT = 9092
 
 STEER_RATIO_CORRECTION = 0.70
 STEER_SIGN = 1.0
@@ -301,6 +305,78 @@ class Vlp16ReceiverUDP:
                     self._points.append((x, y, z, float(reflectivity)))
 
 
+class CollisionReceiverUDP:
+    """MORAI CollisionData 패킷. 회피 검증 자동화용 (규정 허용 채널).
+
+    구조 (MORAI-NetworkModule 24.R2.0 의 lib/define/CollisionData.py 기준):
+        header      char*15    "#CollisionData$"
+        data_lenght int
+        aux_data    int*3
+        sec, nsec   int, int
+        _data       Data*5     객체 5개분
+        tail        char*2
+      Data 하나:
+        objType short, obj_id short, pose_x/y/z float, globalOffset_x/y/z float
+
+    2026-08-06 실측으로 확정됨 (포트 9092, host 9091):
+        길이 181B,  헤더 "#CollisionData$",  data_length 필드 = 148
+        148 = sec(4) + nsec(4) + Data(28) * 5
+        offset 31 의 sec 가 유효한 유닉스 시각으로 읽히는 것까지 확인
+      문서 요약의 201B/32B 는 틀렸고 패킹(정렬 padding 없음) 계산이 맞았다.
+
+      길이가 다르면 발행하지 않고 경고만 낸다. 오프셋을 잘못 잡아 조용히
+      쓰레기값을 내보내는 것이 제일 나쁘다(km/h 를 m/s 로 착각해 12.96배가 됐던
+      전례가 있다). 다시 재려면:
+        python3 scripts/diag_udp_dump.py --port 9092
+    """
+    HEADER = b'#CollisionData$'
+    DATA_OFFSET = 39          # header15 + len4 + aux12 + sec4 + nsec4 (패킹 가정)
+    DATA_SIZE   = 28          # short2 + short2 + float4*6
+    NUM_DATA    = 5
+    EXPECT_LEN  = DATA_OFFSET + DATA_SIZE * NUM_DATA + 2   # = 181
+
+    def __init__(self, ip, port, callback):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind((ip, port))
+        self._callback = callback
+        self._warned = False
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while not rospy.is_shutdown():
+            raw, _ = self.sock.recvfrom(65535)
+            parsed = self._parse(raw)
+            if parsed is not None:
+                self._callback(parsed)
+
+    def _parse(self, raw):
+        if not raw.startswith(self.HEADER):
+            return None
+        if len(raw) != self.EXPECT_LEN:
+            if not self._warned:
+                self._warned = True
+                rospy.logwarn(
+                    "[udp_bridge] CollisionData length %d != expected %d. "
+                    "Not publishing. Fix DATA_SIZE/DATA_OFFSET in CollisionReceiverUDP.",
+                    len(raw), self.EXPECT_LEN)
+            return None
+        try:
+            sec, nsec = struct.unpack('<ii', raw[31:39])
+            objs = []
+            for i in range(self.NUM_DATA):
+                off = self.DATA_OFFSET + i * self.DATA_SIZE
+                t, oid = struct.unpack('<hh', raw[off:off + 4])
+                px, py, pz, gx, gy, gz = struct.unpack('<ffffff', raw[off + 4:off + 28])
+                # objType 0 이고 id 0 이면 빈 슬롯으로 본다
+                if t == 0 and oid == 0 and px == 0.0 and py == 0.0:
+                    continue
+                objs.append({'type': t, 'id': oid, 'pos': (px, py, pz),
+                             'offset': (gx, gy, gz)})
+            return {'sec': sec, 'nsec': nsec, 'objects': objs}
+        except (struct.error, IndexError):
+            return None
+
+
 class UdpBridge:
     def __init__(self):
         self.ctrl = CtrlCmdUDP(DEST_IP, CTRL_CMD_PORT)
@@ -314,6 +390,7 @@ class UdpBridge:
             for cam_id in CAMERA_PORTS
         }
         self.lidar_pub = rospy.Publisher('/lidar/points', PointCloud2, queue_size=1)
+        self.collision_pub = rospy.Publisher('/CollisionData', CollisionData, queue_size=10)
 
         rospy.Subscriber('/ctrl_cmd', CtrlCmd, self._on_ctrl_cmd)
 
@@ -325,10 +402,38 @@ class UdpBridge:
             for cam_id, port in CAMERA_PORTS.items()
         }
         self.lidar_receiver = Vlp16ReceiverUDP("0.0.0.0", LIDAR_RECV_PORT, self._on_lidar)
+        self.collision_receiver = None
+        if COLLISION_RECV_PORT:
+            self.collision_receiver = CollisionReceiverUDP(
+                "0.0.0.0", COLLISION_RECV_PORT, self._on_collision)
 
         rospy.loginfo("[udp_bridge] started (ego_info:%d gps:%d imu:%d cameras:%s lidar:%d)",
                       EGO_INFO_RECV_PORT, GPS_RECV_PORT, IMU_RECV_PORT,
                       CAMERA_PORTS, LIDAR_RECV_PORT)
+
+    def _on_collision(self, data):
+        """충돌을 /CollisionData 로 발행하고 한 번 로그를 남긴다.
+
+        회피 검증 자동화용이다. 예전에는 RViz 를 보면서 "부딪혔나?" 를 눈으로
+        판단해야 했다. 규정상 충돌은 1회 15초라 완주 시간에 직접 들어간다.
+        """
+        out = CollisionData()
+        out.header.stamp = rospy.Time.now()
+        out.header.frame_id = 'map'
+        for o in data['objects']:
+            os_ = ObjectStatus()
+            os_.unique_id = o['id']
+            os_.type = o['type']
+            os_.position = Vector3(*o['pos'])
+            out.collision_object.append(os_)
+        if data['objects']:
+            g = data['objects'][0]['offset']
+            out.global_offset_x, out.global_offset_y, out.global_offset_z = g
+            # ROS_INFO 포맷에 한글을 쓰면 컨테이너 로케일 때문에 깨진다
+            rospy.logwarn('[udp_bridge] COLLISION x%d at (%.2f, %.2f)',
+                          len(data['objects']),
+                          data['objects'][0]['pos'][0], data['objects'][0]['pos'][1])
+        self.collision_pub.publish(out)
 
     def _on_ctrl_cmd(self, msg):
         deg = math.degrees(msg.front_steer)
