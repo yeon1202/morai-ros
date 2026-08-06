@@ -54,6 +54,25 @@ SaveFile/Scenario/R_KR_PR_K-city_2025/
 **자동주행 모드에서는 planning 검증이 아예 불가능하다.** 차가 우리 판단이 아니라
 MORAI 판단으로 움직이기 때문이다.
 
+### ⚠️ 로드 후 Network Settings 에서 **Load** 를 누른다
+
+시나리오를 로드하면 **UI 가 포트를 잘못 읽는다.** 파일엔 네 자리로 제대로 있는데
+UI 가 세 자리로 표시한다(두 번째 문자가 빠진다).
+
+```
+파일                          UI 표시
+Competition   9108 / 9109  →  908 / 909
+Ego Vehicle   9110 / 9111  →  910 / 911
+```
+
+그 상태로는 `Status: Disconnected` 가 되고 `/ego_status` 가 안 온다.
+GPS(2503)·IMU(2505)는 센서라 영향이 없어서, **ego_status 만 안 오는 증상**으로 나타난다.
+
+**Network Settings 창 아래 `Load` 버튼을 누르면 복구된다.** 포트를 손으로 다시
+칠 필요 없다. (2026-08-06 확인)
+
+확인: `rostopic hz /ego_status` 가 20Hz 대면 정상.
+
 시나리오에 들어있는 것: EGO 스폰(경로 0.5m 지점), 정적장애물(328.9m),
 보행자(459.8m, activeDistance 15m), NPC 9대, GPS 음영구역(1939.7m, 118m),
 신호등 16개. 자세한 값은 `50-behavior_fsm_design.md` 와 메모 참조.
