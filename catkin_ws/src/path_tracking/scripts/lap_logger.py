@@ -17,12 +17,13 @@ CTE 가 작은데도 실선을 밟는다면 경로 쪽을 의심해야 한다.
 
 사용법
   rosrun path_tracking lap_logger.py
-  rosrun path_tracking lap_logger.py _out:=/tmp/lap1.csv _start_idx:=889
+  rosrun path_tracking lap_logger.py _out:=/tmp/lap1.csv _start_idx:=0
 
   _out       : CSV 저장 경로 (기본 /tmp/lap.csv)
-  _start_idx : 요약에 포함할 시작 인덱스 (기본 889 = 대회코스 시작.
-               접근구간은 대회 코스가 아니라 차량을 라인에 올리는 구간이므로
-               기본적으로 요약에서 제외한다)
+  _start_idx : 요약에 포함할 시작 인덱스 (기본 0 = 전체)
+               2026-08-06 이전에는 889 였다. 그때는 경로가 접근구간(스폰->코스)
+               + 대회코스 였고 889 부터가 코스였다. 지금은 대회 배포 전역경로로
+               바꿔서 경로 전체가 곧 코스이므로 0 이 맞다.
   _limit     : 위험 판정 기준 [m] (기본 0.654 = 차로 3.2m - 차폭 1.892m 의 편도 여유)
 """
 import os
@@ -55,7 +56,7 @@ class LapLogger:
         self.pm.velocity_profile = [0.0] * len(self.path)
 
         self.out_path  = rospy.get_param('~out', '/tmp/lap.csv')
-        self.start_idx = int(rospy.get_param('~start_idx', 889))
+        self.start_idx = int(rospy.get_param('~start_idx', 0))
         self.limit     = float(rospy.get_param('~limit', 0.654))
 
         self.rows = []          # (t, idx, cte, speed_kmh)

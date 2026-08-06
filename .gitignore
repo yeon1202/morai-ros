@@ -26,3 +26,6 @@ __pycache__/
 
 # --- 로컬 백업본 (경로 재기록 전 스냅샷 등) ---
 *.bak
+
+# --- 대회 제공 맵 데이터 (용량 큼. 필요시 별도 보관) ---
+catkin_ws/src/path_tracking/map/*.json
