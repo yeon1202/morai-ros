@@ -9,21 +9,21 @@
 ---
 
 ## 1. 개발환경·인프라
-| ID | 작업 | 상태 |
-|----|------|------|
+| ID | 작업 | 상태 | 비고 |
+|----|------|------|------|
 | 1.1 | catkin 워크스페이스 구성 (`catkin_ws`) | ✅ |
 | 1.2 | Docker 개발환경 (`morai-noetic`, sim/dev 2컨테이너) | ✅ |
 | 1.3 | `morai_msgs` 연동 (MORAI 메시지/서비스) | ✅ |
 | 1.4 | git 버전관리 (로컬, `feature/acc` 브랜치) | ✅ |
-| 1.5 | MORAI UDP↔ROS 브릿지 (`udp_bridge`, 제어9093/상태9111) | 🔄 |
+| 1.5 | MORAI UDP↔ROS 브릿지 (`udp_bridge`, 제어9093/상태9111) | 🔄 | 규정 제출 시 9109 전환 필요(미완). GPS 중복 발행 버그 발견 → `23-...md` 7.7 |
 | 1.6 | 센서(카메라·라이다) ROS 브릿지 설정 | ⬜ |
 
 ## 2. 경로 (Global / Local Path)
 | ID | 작업 | 상태 | 비고 |
 |----|------|------|------|
-| 2.1 | 전역경로 기록 (`path_recorder`) | 🔄 | 자동주행 경로≠대회코스 → teleop 손기록 예정 |
+| 2.1 | 전역경로 기록 (`path_recorder`) | ✅ | 07-29 전체 재기록. approach 980 + course 3571 → `path_smooth.csv` 4544점 2830m |
 | 2.2 | 경로 스무딩 (`path_smoother`) | ✅ | |
-| 2.3 | 지역경로 추출 (`path_manager` → `/local_path`) | ✅ | 앞 50점 ≈25m |
+| 2.3 | 지역경로 추출 (`path_manager` → `/local_path`) | ✅ | 앞 **140점 ≈84m** (`LOCAL_PATH_SIZE`) |
 | 2.4 | 경로추종 (`pure_pursuit`+PID, `path_tracker` 임시) | ✅ | control팀 정식 노드로 대체 예정 |
 
 ## 3. 횡방향 회피 (Lattice) — `/lattice_path`
@@ -47,8 +47,8 @@
 |----|------|------|------|
 | 4.1 | 순수로직 `acc_core.hpp` (제어식·lead탐색·단위변환) + gtest 10개 | ✅ | Task1·2 |
 | 4.2 | ROS 노드 `acc_planner.cpp` (`/target_velocity` 발행) | ✅ | Task3, 스모크테스트 통과 |
-| 4.3 | `mock_lead_vehicle.cpp` (움직이는 앞차 검증노드) | ⬜ | Task4 |
-| 4.4 | `path_tracker` 임시 통합 (`/target_velocity` 구독) | ⬜ | Task5 |
+| 4.3 | `mock_lead_vehicle.cpp` (움직이는 앞차 검증노드) | ✅ | Task4. `acc.launch` 에 배선 완료 |
+| 4.4 | `path_tracker` 임시 통합 (`/target_velocity` 구독) | ✅ | Task5. 0.5s 끊김 시 자체속도 폴백까지 (`path_tracker.py:129`) |
 | 4.5 | `/target_velocity` 인터페이스 문서 (control 인계) | ⬜ | Task6 |
 | 4.6 | 실차 확인 + gain 튜닝 (velocity_gain/distance_gain) | ⬜ | 시뮬에서 |
 | — | 문서: `40-acc_design.md`, `41-acc_plan.md` | ✅ | |
@@ -56,16 +56,16 @@
 ## 5. Behavior FSM (미션 로직) — 점수원
 | ID | 작업 | 상태 | 비고 |
 |----|------|------|------|
-| 5.1 | 상태 설계 (FSM 구조·전이) | ⬜ | 신호/차선유지/끼어들기/보행자 |
+| 5.1 | 상태 설계 (FSM 구조·전이) | ✅ | 08-03. `50-behavior_fsm_design.md`. 종방향=제약합성, 횡방향=상태기계 |
 | 5.2 | 신호등 정지 (traffic light) | ⬜ | ACC 범위 밖이었음 |
 | 5.3 | 보행자 급정지 (즉발동, 트랙 갓잡혀도) | ⬜ | ACC 범위 밖이었음 |
-| 5.4 | 끼어들기/차선변경 판단 | ⬜ | |
+| 5.4 | 끼어들기/차선변경 판단 | ⬜ | 차선변경은 5.1 에 설계됨. 끼어들기(합류)는 v1 범위 밖 |
 | 5.5 | lattice·ACC와 우선순위 조율 | ⬜ | behavior가 상위 오버라이드 |
 
 ## 6. 통합·검증
 | ID | 작업 | 상태 | 비고 |
 |----|------|------|------|
-| 6.1 | 오프라인 end-to-end (mock→planning→차 반응) | ⬜ | Task4·5 완료 후 |
+| 6.1 | 오프라인 end-to-end (mock→planning→차 반응) | ⬜ | 선행조건(4.3·4.4) 완료됨 → 착수 가능 |
 | 6.2 | MORAI 실차 통합 | ⬜ | |
 | 6.3 | 속도프로파일 최적화 (곡률기반) | ⬜ | Phase6 |
 | 6.4 | 완주 리허설 (제한 15분, 채점=시간+패널티) | ⬜ | |
@@ -73,7 +73,7 @@
 ## 7. 타팀 인터페이스 (내가 소비/생산하는 접점)
 | ID | 인터페이스 | 방향 | 타입 | 상태 |
 |----|-----------|------|------|------|
-| 7.1 | localization `/odom` (ENU pose+twist) | 소비 | `nav_msgs/Odometry` | 🔄 합의됨, 개발중 `/ego_status` 스탠드인 → 교체 예정 |
+| 7.1 | localization `/odom` (ENU pose+twist) | 소비 | `nav_msgs/Odometry` | 🔄 08-03 좌표 프레임 실측 → **최대 11.3m 불일치**. 원인 3개 특정, 전달 대기 (`23-...md`) |
 | 7.2 | perception `/Object_topic` (Kalman 적용) | 소비 | `morai_msgs/ObjectStatusList` | 🔄 합의됨, mock으로 개발중 |
 | 7.3 | control ← `/lattice_path` (횡) | 생산 | `nav_msgs/Path` | ✅ 발행중 |
 | 7.4 | control ← `/target_velocity` (종) | 생산 | `std_msgs/Float64` | 🔄 발행중, 인터페이스 문서화(4.5) 예정 |
@@ -87,6 +87,11 @@
 ---
 
 ## 현재 위치 / 다음 3스텝
-- **지금**: 4.2까지 완료(ACC 노드 동작확인). 커밋 `14fdc85`.
-- **다음**: 4.3 `mock_lead_vehicle` → 4.4 `path_tracker` 통합 → 4.5 인터페이스 문서 → (그다음) **5. Behavior FSM**.
+
+*갱신: 2026-08-03*
+
+- **지금**: 종방향(4장)은 4.5 문서만 남기고 사실상 완료. 횡방향(3장)은 재설계 후
+  **실차 확인(3.5)이 미완**. behavior 는 설계(5.1)까지 완료.
+- **다음**: 3.5 lattice 실차 회피 확인 → 5.1 구현(`behavior_fsm` 노드) → 4.5 인터페이스 문서.
+- **별건 진행중**: localization 실측 결과 전달, 브릿지 GPS 중복 발행 수정(담당자), 9109 전환.
 - **우선순위 원칙**: 네트워크규정 > localization > planning(충분히) > **behavior(빡세게, 점수원)**.

@@ -12,6 +12,15 @@
 - 허용: ① Ego Ctrl Cmd(longi type1 accel/brake) ② CollisionData ③ **Competition Vehicle Status** ④~⑦ GPS/IMU/Camera/LiDAR
 - ⚠️ 차량정보는 **Competition Vehicle Status(CompetitionInfoPublisher)** 만 허용.
   현재 우리 브릿지는 **Ego Vehicle Status(MoraiInfoPublisher, #MoraiInfo$, 9111)** 사용 중 → **교체 필요(실격 위험)**.
+- ⚠️ **객체 정보(MoraiObjectInfoPublisher)는 허용 목록에 없다 → 사용 금지.**
+  시뮬은 NPC·보행자·장애물의 위치를 그대로 주지만, 그걸 받으면 실격이다.
+  `/Object_topic` 의 **합법적인 생산자는 perception 팀(Camera/LiDAR 인지)뿐**이다.
+  perception 준비 전까지는 `mock_obstacle_pub` 이 유일한 대안이며, 시뮬 객체를
+  브릿지로 끌어오는 경로는 **만들지 않는다**. (ego position 9111 과 같은 함정)
+- 📌 **파일과 네트워크를 구분할 것.** 규정이 막는 것은 **주행 중 네트워크 수신**이다.
+  MGeo(HD맵) 처럼 **미리 파일로 받아 오프라인으로 쓰는 지도 데이터는 별개**이며
+  사용 가능하다(2026-08-03 확인). 판단 기준은 "주행 중에 그 정보가 네트워크로
+  들어오는가" 다.
 
 ### Localization
 - **GPS 음영 구역**(GPS blackout) 미션 존재 → 위치는 GPS(+IMU)로 추정, 음영에선 IMU 추측항법.

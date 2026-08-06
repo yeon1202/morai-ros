@@ -29,6 +29,7 @@
 | [20-perception_interface.md](20-perception_interface.md) | perception → planning. `/Object_topic`, `morai_msgs/ObjectStatusList` |
 | [21-localization_interface.md](21-localization_interface.md) | localization → planning. `/odom`, `nav_msgs/Odometry` |
 | 22-target_velocity_interface.md | planning → control. `/target_velocity`. **미작성** (41-acc_plan.md Task6) |
+| [23-localization_node_review.md](23-localization_node_review.md) | localization 팀 `localization_node.cpp` 리뷰. `/odom` 명세 대조와 좌표 프레임 정합 리스크 |
 
 ## 3x — 횡방향 (lattice)
 
@@ -50,7 +51,7 @@
 
 | 문서 | 내용 |
 |---|---|
-| 50-behavior_fsm_design.md | FSM 전체 설계와 우선순위 중재. **미작성** |
+| [50-behavior_fsm_design.md](50-behavior_fsm_design.md) | **FSM 설계.** 종방향 제약 합성(min)과 횡방향 상태기계, 우선순위 중재 |
 | [51-traffic_light_brief.md](51-traffic_light_brief.md) | **planning 인수인계 브리프.** 경로·local path·lattice·ACC 를 어떻게 구성했는지, 세팅과 함정 |
 
 ## 다음 번호대 (예정)
