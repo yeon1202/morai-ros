@@ -20,6 +20,19 @@
   <!-- lattice 회피 경로 생성 -->
   <node pkg="path_tracking" type="lattice_planner" name="lattice_planner" output="screen"/>
 
+  <!-- ACC: 종방향. /speed_limit 합성 전이라 지금은 이 노드가 /target_velocity 를 직접 낸다.
+       끄면(acc:=false) path_tracker 가 자체 TARGET_SPEED_KMH(20) 로 정속 주행한다.
+       켜면 크루즈 55 + 곡률 감속 + 앞차 추종이 살아난다. -->
+  <arg name="acc"               default="true"/>
+  <arg name="cruise_speed_kmh"  default="55.0"/>
+  <arg name="lookahead"         default="60.0"/>
+  <arg name="accel_rate_limit"  default="1.0"/>
+  <node if="$(arg acc)" pkg="path_tracking" type="acc_planner" name="acc_planner" output="screen">
+    <param name="cruise_speed_kmh" value="$(arg cruise_speed_kmh)"/>
+    <param name="lookahead"        value="$(arg lookahead)"/>
+    <param name="accel_rate_limit" value="$(arg accel_rate_limit)"/>
+  </node>
+
   <!-- RViz -->
   <node pkg="rviz" type="rviz" name="rviz" args="-d $(find udp_bridge)/rviz/ego.rviz"/>
 </launch>
