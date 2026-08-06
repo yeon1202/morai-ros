@@ -126,6 +126,7 @@ private:
   morai_msgs::EgoVehicleStatus ego_;
   morai_msgs::ObjectStatusList objs_;
   bool has_path_ = false, has_ego_ = false, has_obj_ = false;
+  bool cand_shown_ = false;   // RViz 에 후보 마커가 떠 있는 상태인가
 
   void pathCb(const nav_msgs::Path::ConstPtr& m) { local_path_ = *m; has_path_ = true; }
   void egoCb(const morai_msgs::EgoVehicleStatus::ConstPtr& m) { ego_ = *m; has_ego_ = true; }
@@ -342,6 +343,25 @@ private:
     return best;
   }
 
+  // 후보 마커 지우기.
+  //
+  // RViz 마커는 "지워라" 고 말해주지 않으면 계속 남는다. 회피가 끝나 run() 이
+  // 일찍 반환하면 publishCandidates() 가 안 불리고, 마지막 화면이 그대로 얼어붙는다.
+  // 그러면 이미 지나친 장애물 때문에 아직도 전부 막힌 것처럼 보인다.
+  // (2026-08-04 주행 영상에서 실제로 이렇게 보였다.)
+  //
+  // 이미 지운 상태면 매 틱 쏘지 않는다. 상태가 바뀔 때만 한 번 보낸다.
+  void clearCandidates()
+  {
+    if (!cand_shown_) return;
+    visualization_msgs::MarkerArray arr;
+    visualization_msgs::Marker del;
+    del.action = visualization_msgs::Marker::DELETEALL;
+    arr.markers.push_back(del);
+    pub_cand_.publish(arr);
+    cand_shown_ = false;
+  }
+
   void publishCandidates(const std::vector<nav_msgs::Path>& cands, int best,
                          const std::vector<bool>& blocked)
   {
@@ -368,6 +388,7 @@ private:
       arr.markers.push_back(m);
     }
     pub_cand_.publish(arr);
+    cand_shown_ = true;
   }
 
   void run(const ros::TimerEvent&)
@@ -380,11 +401,12 @@ private:
     // 회피할 이유가 없으면 기준경로 그대로 (lattice 안 돌림)
     if (trigger_obs.empty() || !objectOnPath(trigger_obs)) {
       pub_path_.publish(local_path_);
+      clearCandidates();
       return;
     }
 
     std::vector<nav_msgs::Path> cands = generateCandidates();
-    if (cands.empty()) { pub_path_.publish(local_path_); return; }
+    if (cands.empty()) { pub_path_.publish(local_path_); clearCandidates(); return; }
 
     // 후보 충돌 검사에는 보행자도 포함한다. 이미 회피 중이라면 보행자를 뚫고
     // 가는 후보를 고르면 안 된다.
