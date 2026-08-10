@@ -238,6 +238,12 @@ if(TARGET acc_core_test)
   target_link_libraries(acc_core_test ${catkin_LIBRARIES} gtest_main)
 endif()
 
+## gtest: behavior FSM 순수 로직 단위 테스트
+catkin_add_gtest(behavior_core_test test/behavior_core_test.cpp)
+if(TARGET behavior_core_test)
+  target_link_libraries(behavior_core_test ${catkin_LIBRARIES} gtest_main)
+endif()
+
 add_executable(acc_planner src/acc_planner.cpp)
 add_dependencies(acc_planner ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 target_link_libraries(acc_planner ${catkin_LIBRARIES})
