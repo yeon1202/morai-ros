@@ -24,10 +24,12 @@
 ## 2. 구조
 
 ```
-acc_planner      → /speed_limit/acc          크루즈·곡률·앞차
+acc_planner      → /speed_limit/acc           크루즈·곡률·앞차
 [신호등]         → /speed_limit/traffic_light
-[보행자]         → /speed_limit/pedestrian
-lattice_planner  → /speed_limit/avoid        전 후보 막힘
+[보행자]         → /speed_limit/pedestrian    (perception 대기)
+lattice_planner  → /speed_limit/avoid         전 후보 막힘
+(FSM 내부)       → /speed_limit/intersection  정지선까지 남은 거리
+(FSM 내부)       → /speed_limit/highway       고주로 (v1 은 끔)
                           │
                     ┌─────▼──────────────────────────┐
                     │        behavior_fsm            │
@@ -72,6 +74,17 @@ lattice_planner  → /speed_limit/avoid        전 후보 막힘
 
 `rampTarget` 자체는 순수 함수(`acc_core.hpp`)이므로 호출 위치만 옮기면 된다.
 2026-07-29 실차 검증된 로직을 그대로 재사용한다.
+
+### ⚠️ ACC 와 lattice 가 서로를 모른다 (2026-08-06 실측)
+
+회피 구간(328.9m)에서 속도가 **51.9 -> 15.5 km/h** 까지 떨어졌다. `acc_core` 의
+`selectLead` 가 정적 장애물도 앞차 후보로 보기 때문이다.
+
+안전하지만 손해다. lattice 가 이미 피하고 있는데 ACC 는 그걸 모르고 브레이크를 밟는다.
+**"피할 수 있으니 덜 줄여도 된다" 를 조율할 층이 없다** — FSM 이 풀어야 할 문제다.
+
+v1 에서 다루는 방법: `lattice_status.intent_feasible` 이 참이면(= 회피 경로가 살아 있으면)
+FSM 이 `/speed_limit/acc` 를 완화해서 쓴다. 완화량은 구현·튜닝 단계에서 정한다.
 
 ### `lattice_planner`
 
@@ -177,6 +190,50 @@ OVERTAKE_HOLD 초 지속  →  "앞차 때문에 못 달리고 있다"  →  추
 | 정지 | `0.0` |
 | 주기 | 10Hz 이상 |
 
+### 5.1.1 제약 생산자 목록 (2026-08-10 확정)
+
+| 토픽 | 생산자 | 상태 |
+|---|---|---|
+| `/speed_limit/acc` | `acc_planner` | 있음(발행 토픽만 바꾸면 됨) |
+| `/speed_limit/traffic_light` | 신호등 담당자 | 대기 |
+| `/speed_limit/pedestrian` | perception | **대기. mock 추가 안 함** |
+| `/speed_limit/avoid` | `lattice_planner` | 미구현 |
+| `/speed_limit/intersection` | `behavior_fsm` 내부 | **신규.** 정지선 5곳(`52-stopline_table.txt`)까지 남은 거리로 미리 감속 |
+| `/speed_limit/highway` | `behavior_fsm` 내부 | **신규. v1 에서는 끈다** — 아래 |
+
+**구간 제한속도(`section`)는 넣지 않는다.** 대회 규정이 전구간 60kph 이고 크루즈 55 가
+이미 그 아래다. MGeo `max_speed` 를 상한으로 쓸 이유가 없다.
+
+### 5.1.2 ⚠️ 고주로 상한 — 설계만 하고 v1 에서는 끈다
+
+고주로 구간(경로 1123~1597m, 474m, MGeo `max_speed` 120)은 규정상 60 상한의 예외다.
+계산상 80km/h 로 달리면 **8.8초**를 아낄 수 있다.
+
+**그런데 2026-08-10 실측에서 위험이 확인됐다.**
+
+| 크루즈 | 고주로 CTE 최대 | NPC 충돌 |
+|---|---|---|
+| 55 | 0.294 m | 없음 |
+| 60 (하드캡에 걸린 값) | **1.069 m** | **있음 (s≈1397m)** |
+
+충돌 지점은 시나리오 NPC2(s=1399.2m, 목표속도 40)·NPC1(s=1406.7m, 50)과 일치하고,
+그때 우리 속도가 38~39km/h 로 NPC 목표속도에 묶여 있었다.
+
+**원인은 속도 자체가 아니라 인지 부재다.**
+```
+NPC 목표속도 40~60 km/h
+우리 55  ->  NPC 를 못 따라잡음  ->  안 만남   (충돌 없음은 운이었다)
+우리 60  ->  NPC 를 따라잡음    ->  못 보고 추돌
+```
+`/Object_topic` 에 NPC 가 없으므로 ACC 가 앞차를 잡지 못한다. **빨리 갈수록 NPC 와
+만날 확률만 높아진다.**
+
+→ `acc_core.hpp` 의 `max_speed = 16.67`(60kph) 하드캡이 결과적으로 안전장치였다.
+→ **perception 이 NPC 를 주기 전까지 이 제약은 켜지 않는다.** 켤 때는 `max_speed`
+   하드캡도 같이 올려야 한다(`cruise_speed_kmh` 만 바꾸면 60 에서 잘린다 — 실측 확인).
+→ 탈출 감속은 걱정할 필요 없었다. 55/60 둘 다 곡률 제한이 구간 끝 커브를 미리 보고
+   30km/h 로 줄였고 CTE 는 0.28m 로 안정적이었다.
+
 ### 5.2 `/lateral_intent` (신규, `path_tracking/LateralIntent`)
 
 ```
@@ -197,7 +254,7 @@ bool    all_blocked       # 모든 후보가 막혔나
 
 메시지는 `path_tracking` 패키지 안에 `msg/` 를 만들어 정의한다.
 
-### 4.5 파라미터 — 값은 구현·튜닝 단계에서 정한다
+### 5.4 파라미터 — 값은 구현·튜닝 단계에서 정한다
 
 아래는 **이름만 정한 것**이다. 확정값이 아니다. 괄호는 출발점으로 삼을 감각.
 
