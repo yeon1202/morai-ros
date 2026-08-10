@@ -195,10 +195,10 @@ OVERTAKE_HOLD 초 지속  →  "앞차 때문에 못 달리고 있다"  →  추
 | 토픽 | 생산자 | 상태 |
 |---|---|---|
 | `/speed_limit/acc` | `acc_planner` | 있음(발행 토픽만 바꾸면 됨) |
-| `/speed_limit/traffic_light` | 신호등 담당자 | 대기 |
+| `/speed_limit/traffic_light` | 신호등 담당자 | 대기. **교차로 통과 전반을 인계**(`51-...md` 5절) |
 | `/speed_limit/pedestrian` | perception | **대기. mock 추가 안 함** |
 | `/speed_limit/avoid` | `lattice_planner` | 미구현 |
-| `/speed_limit/intersection` | `behavior_fsm` 내부 | **신규.** 정지선 5곳(`52-stopline_table.txt`)까지 남은 거리로 미리 감속 |
+| `/speed_limit/intersection` | **신호등 담당자** | 2026-08-10 인계. 정지선 5곳(`52-stopline_table.txt`)까지 남은 거리로 미리 감속 |
 | `/speed_limit/highway` | `behavior_fsm` 내부 | **신규. v1 에서는 끈다** — 아래 |
 
 **구간 제한속도(`section`)는 넣지 않는다.** 대회 규정이 전구간 60kph 이고 크루즈 55 가

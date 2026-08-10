@@ -3,6 +3,7 @@
 // 구독:  /speed_limit/acc            (Float64)  크루즈·곡률·앞차   <- acc_planner
 //        /speed_limit/traffic_light  (Float64)  신호등             <- 담당자
 //        /speed_limit/pedestrian     (Float64)  보행자             <- perception 대기
+//        /speed_limit/intersection   (Float64)  교차로 접근 감속   <- 신호등 담당자
 //        /speed_limit/avoid          (Float64)  회피 불가          <- lattice (미구현)
 //        /ego_status                 (EgoVehicleStatus)  상승률 제한에 현재 속도가 필요
 // 발행:  /target_velocity            (Float64)  종방향 단일 권한 [m/s]
@@ -32,20 +33,22 @@ namespace {
 
 // 제약 슬롯. 순서가 곧 인덱스이고 winner 가 이 순서를 가리킨다.
 //
-// intersection 과 highway 는 FSM 내부에서 만들 제약이라 아직 채우지 않는다.
-// 자리만 잡아두면 나중에 추가할 때 인덱스가 밀리지 않는다.
+// avoid 와 highway 는 아직 생산자가 없다. 자리를 잡아두면 나중에 추가할 때
+// 인덱스가 밀리지 않는다.
 enum LimitIdx {
   LIM_ACC = 0,
   LIM_TRAFFIC_LIGHT,
   LIM_PEDESTRIAN,
-  LIM_AVOID,
-  LIM_INTERSECTION,   // 미구현 (FSM 내부 생산 예정)
+  LIM_INTERSECTION,   // 신호등 담당자가 발행 (2026-08-10 인계)
+  LIM_AVOID,          // lattice 미구현
   LIM_HIGHWAY,        // 미구현 (v1 에서는 끈다 - 설계 5.1.2)
   LIM_COUNT
 };
 
+// 순서가 enum 과 정확히 일치해야 한다. winner 인덱스로 이 배열을 찾기 때문에
+// 어긋나면 진단 로그가 조용히 엉뚱한 이름을 낸다.
 const char* kNames[LIM_COUNT] = {
-  "acc", "traffic_light", "pedestrian", "avoid", "intersection", "highway"
+  "acc", "traffic_light", "pedestrian", "intersection", "avoid", "highway"
 };
 
 constexpr double kTimerHz = 30.0;
@@ -76,6 +79,8 @@ public:
         "/speed_limit/traffic_light", 1, boost::bind(&BehaviorFsm::limitCb, this, _1, LIM_TRAFFIC_LIGHT));
     sub_ped_ = nh.subscribe<std_msgs::Float64>(
         "/speed_limit/pedestrian", 1, boost::bind(&BehaviorFsm::limitCb, this, _1, LIM_PEDESTRIAN));
+    sub_int_ = nh.subscribe<std_msgs::Float64>(
+        "/speed_limit/intersection", 1, boost::bind(&BehaviorFsm::limitCb, this, _1, LIM_INTERSECTION));
     sub_avd_ = nh.subscribe<std_msgs::Float64>(
         "/speed_limit/avoid", 1, boost::bind(&BehaviorFsm::limitCb, this, _1, LIM_AVOID));
 
@@ -155,7 +160,7 @@ private:
   double prev_target_ = 0.0;       // [m/s]
   ros::Time prev_time_;
 
-  ros::Subscriber sub_acc_, sub_tl_, sub_ped_, sub_avd_, sub_ego_;
+  ros::Subscriber sub_acc_, sub_tl_, sub_ped_, sub_int_, sub_avd_, sub_ego_;
   ros::Publisher  pub_vel_, pub_active_;
   ros::Timer      timer_;
 };
