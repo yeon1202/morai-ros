@@ -14,6 +14,8 @@
 #include <morai_msgs/EgoVehicleStatus.h>
 #include <morai_msgs/ObjectStatusList.h>
 #include <morai_msgs/ObjectStatus.h>
+#include <string>
+
 #include "path_tracking/acc_core.hpp"
 
 // 타이머 주기. run() 에서 첫 틱의 dt 로도 쓰므로 상수로 둔다.
@@ -63,7 +65,14 @@ public:
     sub_lattice_ = nh.subscribe("/lattice_path", 1, &AccPlanner::latticeCb, this);
     sub_ego_     = nh.subscribe("/ego_status",   1, &AccPlanner::egoCb,     this);
     sub_obj_     = nh.subscribe("/Object_topic", 1, &AccPlanner::objCb,     this);
-    pub_vel_     = nh.advertise<std_msgs::Float64>("/target_velocity", 1);
+    // 발행 토픽. behavior_fsm 이 종방향 단일 권한을 가지므로 기본값은 제약 토픽이다.
+    //
+    // acc_planner 는 이제 "크루즈·곡률·앞차를 고려하면 이 속도까지" 라는 **제약**만
+    // 낸다. 최종 목표속도는 behavior_fsm 이 다른 제약들과 min() 해서 정한다.
+    // behavior_fsm 없이 단독으로 돌려보려면 이 값을 /target_velocity 로 바꾼다.
+    std::string out_topic = "/speed_limit/acc";
+    pnh.param<std::string>("output_topic", out_topic, out_topic);
+    pub_vel_     = nh.advertise<std_msgs::Float64>(out_topic, 1);
     timer_       = nh.createTimer(ros::Duration(1.0 / kTimerHz), &AccPlanner::run, this);
     // ROS_INFO 포맷 문자열에는 한글을 쓰지 않는다. 컨테이너 로케일이 UTF-8 이
     // 아니라 로그 출력에서 '?' 로 깨진다(주석의 한글은 컴파일러가 처리하므로 무관).
@@ -83,9 +92,6 @@ private:
   ros::Time lattice_stamp_;
   bool has_local_ = false, has_ego_ = false, has_obj_ = false;
 
-  // 목표속도 상승률 제한용 상태. prev_time_ 이 zero 면 아직 첫 틱을 안 돈 것이다.
-  double    prev_target_ = 0.0;
-  ros::Time prev_time_;
 
   void localCb(const nav_msgs::Path::ConstPtr& m)   { local_path_ = *m; has_local_ = true; }
   void egoCb(const morai_msgs::EgoVehicleStatus::ConstPtr& m) { ego_ = *m; has_ego_ = true; }
@@ -151,23 +157,9 @@ private:
       target = curve_limit;
     }
 
-    // 목표속도 상승률 제한. 크루즈·앞차추종·곡률을 모두 합산한 뒤 마지막에 한 번
-    // 적용한다. 목표가 어떤 이유로 오르든 동일하게 제한하기 위해서다.
-    ros::Time now = ros::Time::now();
-    double dt = prev_time_.isZero() ? (1.0 / kTimerHz) : (now - prev_time_).toSec();
-    if (prev_time_.isZero() || dt > params_.rate_dt_max) {
-      // 첫 틱이거나 오래 끊겼다. 달리는 차에 낡은 목표(또는 0)를 명령하면
-      // 급제동이 걸리므로 현재 속도로 시드한다.
-      prev_target_ = ego_vel;
-    }
-    double ramped = acc::rampTarget(prev_target_, target, ego_vel, dt, params_);
-    if (ramped < target) {
-      ROS_INFO_THROTTLE(2.0, "[acc] rate limit: %.2f -> %.2f m/s (%.1f km/h)",
-                        target, ramped, ramped * 3.6);
-    }
-    target       = ramped;
-    prev_target_ = target;
-    prev_time_   = now;
+    // 상승률 제한(rampTarget)은 여기서 하지 않는다. behavior_fsm 이 모든 제약을
+    // min() 한 **뒤에** 적용한다. 그래야 신호가 녹색으로 바뀌는 순간처럼 다른
+    // 제약이 풀릴 때의 급가속도 함께 막을 수 있다. (설계 50-behavior_fsm_design.md 3절)
 
     std_msgs::Float64 msg;
     msg.data = target;

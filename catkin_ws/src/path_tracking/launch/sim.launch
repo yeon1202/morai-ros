@@ -30,6 +30,14 @@
   <node if="$(arg acc)" pkg="path_tracking" type="acc_planner" name="acc_planner" output="screen">
     <param name="cruise_speed_kmh" value="$(arg cruise_speed_kmh)"/>
     <param name="lookahead"        value="$(arg lookahead)"/>
+  </node>
+
+  <!-- behavior_fsm: /speed_limit/* 를 min() 으로 합쳐 /target_velocity 를 낸다.
+       상승률 제한(accel_rate_limit)도 여기서 적용한다 - min 뒤에 있어야 신호가
+       녹색으로 바뀌는 순간 같은 급가속까지 막을 수 있기 때문이다.
+       acc:=false 로 끄면 이 노드도 같이 꺼지고 path_tracker 가 자체 속도로 돈다. -->
+  <node if="$(arg acc)" pkg="path_tracking" type="behavior_fsm" name="behavior_fsm" output="screen">
+    <param name="cruise_speed_kmh" value="$(arg cruise_speed_kmh)"/>
     <param name="accel_rate_limit" value="$(arg accel_rate_limit)"/>
   </node>
 

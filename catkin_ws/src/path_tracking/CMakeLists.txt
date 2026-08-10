@@ -244,6 +244,10 @@ if(TARGET behavior_core_test)
   target_link_libraries(behavior_core_test ${catkin_LIBRARIES} gtest_main)
 endif()
 
+add_executable(behavior_fsm src/behavior_fsm.cpp)
+add_dependencies(behavior_fsm ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+target_link_libraries(behavior_fsm ${catkin_LIBRARIES})
+
 add_executable(acc_planner src/acc_planner.cpp)
 add_dependencies(acc_planner ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 target_link_libraries(acc_planner ${catkin_LIBRARIES})
