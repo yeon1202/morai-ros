@@ -29,3 +29,6 @@ __pycache__/
 
 # --- 대회 제공 맵 데이터 (용량 큼. 필요시 별도 보관) ---
 catkin_ws/src/path_tracking/map/*.json
+
+# --- 팀 코드 로컬 사본 (팀 깃허브에서 받는 것. 우리 repo 에 커밋 안 함) ---
+catkin_ws/src/autonomous_driving/
