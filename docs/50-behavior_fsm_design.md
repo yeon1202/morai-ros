@@ -86,7 +86,212 @@ lattice_planner  → /speed_limit/avoid         전 후보 막힘
 v1 에서 다루는 방법: `lattice_status.intent_feasible` 이 참이면(= 회피 경로가 살아 있으면)
 FSM 이 `/speed_limit/acc` 를 완화해서 쓴다. 완화량은 구현·튜닝 단계에서 정한다.
 
-### `lattice_planner`
+---
+
+## 3.5 종방향 구현 — 코드가 실제로 어떻게 도는가
+
+> **2026-08-10 구현 완료.** 이 절은 설계가 아니라 **완성된 코드를 읽는 안내**다.
+> 나중에 이 부분을 고칠 때, 또는 새 제약을 붙일 때 여기부터 보면 된다.
+
+### 3.5.1 파일 세 개
+
+| 파일 | 하는 일 | ROS 의존 |
+|---|---|---|
+| `include/path_tracking/behavior_core.hpp` | 제약 합성 **순수 로직** | ❌ 없음 |
+| `src/behavior_fsm.cpp` | ROS 노드. 구독·발행·타이머 | ✅ |
+| `test/behavior_core_test.cpp` | gtest 10개 | ❌ |
+
+**순수 로직을 왜 분리했나.** `acc_core.hpp` 와 같은 이유다.
+
+- ROS 를 안 쓰므로 **시뮬 없이, roscore 없이** 테스트가 돈다. gtest 10개가 1ms 에 끝난다
+- 로직 버그와 배선 버그가 섞이지 않는다. 테스트가 통과하면 "합성은 맞다" 가 확정되고,
+  그래도 차가 이상하면 **배선 문제**로 범위가 좁혀진다
+- 헤더 하나라 다른 노드가 가져다 쓸 수도 있다
+
+### 3.5.2 한 틱에 일어나는 일
+
+노드는 **30Hz 타이머**로 돈다. 콜백은 값을 저장만 하고, 계산은 전부 타이머에서 한다.
+
+```
+① 콜백들이 비동기로 도착        limits_[i].value, .stamp 갱신
+                                 (계산 안 함. 저장만)
+        ↓
+② 타이머 tick (30Hz)
+        ↓
+③ has_ego_ 확인                 현재 속도가 없으면 그냥 return
+        ↓
+④ combineLimits(limits_, now, 0.5)
+        ↓  Combined{value, winner, alive}
+        ↓
+⑤ alive == 0 이면 발행 중단      경고만 내고 return
+        ↓
+⑥ dt 계산 + rampTarget          상승률 제한
+        ↓
+⑦ /target_velocity 발행
+   /speed_limit/active 발행       진단용
+```
+
+**왜 콜백에서 바로 계산하지 않나.** 제약이 6개면 콜백도 6개다. 아무 콜백에서나
+계산하면 **어느 콜백이 마지막이었냐에 따라 결과가 달라진다.** 타이머로 몰면
+주기가 일정하고, `dt` 도 안정적이라 `rampTarget` 이 제대로 동작한다.
+
+### 3.5.3 `combineLimits()` 한 줄씩
+
+```cpp
+inline Combined combineLimits(const std::vector<Limit>& limits,
+                              double now, double timeout) {
+  Combined c;                                  // value=kNoLimit, winner=-1, alive=0
+  for (std::size_t i = 0; i < limits.size(); ++i) {
+    const Limit& L = limits[i];
+
+    if (L.stamp < 0.0) continue;               // (A) 한 번도 안 옴
+
+    double v = L.value;
+    if (now - L.stamp > timeout) {             // (B) 오다가 끊김
+      if (L.on_stale == StaleAction::Ignore) continue;
+      v = L.stale_value;
+    }
+
+    ++c.alive;                                 // (C)
+    if (v < c.value) {                         // (D)
+      c.value  = v;
+      c.winner = static_cast<int>(i);
+    }
+  }
+  return c;
+}
+```
+
+**(A) `stamp < 0` 이 "미수신"이다.** 별도 `bool` 을 두지 않았다. 시각은 항상
+0 이상이므로 음수는 절대 나올 수 없어서, 초기값 `-1.0` 하나로 구분된다.
+
+**(B) 여기가 이 함수의 핵심이다.** "한 번도 안 옴" 과 "오다가 끊김" 을 다르게 다룬다.
+
+```
+한 번도 안 옴 = 그 모듈이 아예 없다 (예: perception 미개발)  ->  무시
+오다가 끊김   = 돌던 것이 죽었다                             ->  정책 적용
+```
+
+둘을 같이 취급하면, **perception 이 없는 지금 보행자 제약이 계속 보수값(크루즈 절반)
+으로 걸려 차가 영영 느리게 다닌다.** 실제로 이 케이스를 gtest 로 고정해뒀다
+(`NeverReceivedIsIgnoredEvenIfConservative`).
+
+**(C) `alive` 를 여기서 센다.** `kNoLimit` 인 제약도 살아있으면 센다.
+"살아있지만 아무도 속도를 안 깎는다" 와 "제약이 다 죽었다" 는 다르기 때문이다.
+
+**(D) `<` 이지 `<=` 가 아니다.** 값이 같으면 **먼저 온 인덱스가 이긴다.**
+`<=` 로 하면 크루즈와 곡률이 같은 값일 때 `winner` 가 매 틱 깜빡여서 진단 로그가
+지저분해진다. 사소해 보이지만 gtest 로 고정해뒀다(`TieKeepsFirstIndex`).
+
+### 3.5.4 `rampTarget` 이 `min()` 뒤여야 하는 이유 — 숫자로
+
+`rampTarget` 은 **목표속도가 오르는 속도**를 제한한다(초당 1.0 m/s). 감속은 안 막는다.
+
+**옛 위치(`acc_planner` 안)에서 못 막던 상황:**
+
+```
+빨간불    /speed_limit/traffic_light = 0.0    ->  차 정지
+녹색 전환 /speed_limit/traffic_light = 1e6    ->  min() 결과가 0 -> 15.28 로 점프
+```
+
+`acc_planner` 안의 `rampTarget` 은 **자기가 만든 값(크루즈·곡률·앞차)만** 눌렀다.
+신호등 제약은 그 뒤에 `min()` 으로 합쳐지므로, **점프를 볼 수조차 없었다.**
+
+**지금 위치에서는:**
+
+```
+min() 결과   0.00 → 15.28  (한 틱에 점프)
+rampTarget   0.00 → 0.03 → 0.07 → ...  (30Hz 에서 틱당 0.033 m/s)
+             ≈ 15초에 걸쳐 15.28 도달
+```
+
+스모크 테스트에서 실제로 이렇게 나왔다(3.5.6).
+
+### 3.5.5 콜백 하나로 제약 6개 받기
+
+제약마다 콜백 함수를 6개 만들면 똑같은 코드가 6벌 생긴다. `boost::bind` 로
+**인덱스를 미리 묶어서** 하나로 처리한다.
+
+```cpp
+sub_acc_ = nh.subscribe<std_msgs::Float64>(
+    "/speed_limit/acc", 1, boost::bind(&BehaviorFsm::limitCb, this, _1, LIM_ACC));
+//                                                            ↑ 메시지  ↑ 인덱스
+
+void limitCb(const std_msgs::Float64::ConstPtr& msg, int idx) {
+  limits_[idx].value = msg->data;
+  limits_[idx].stamp = ros::Time::now().toSec();
+}
+```
+
+`_1` 이 "여기에 메시지가 들어온다" 는 자리표시자이고, `LIM_ACC` 는 **구독할 때 이미
+정해져 고정된다.** 그래서 콜백은 자기가 몇 번 제약인지 알고 들어온다.
+
+**⚠️ enum 과 이름 배열의 순서가 반드시 같아야 한다.**
+
+```cpp
+enum LimitIdx { LIM_ACC=0, LIM_TRAFFIC_LIGHT, LIM_PEDESTRIAN,
+                LIM_INTERSECTION, LIM_AVOID, LIM_HIGHWAY, LIM_COUNT };
+
+const char* kNames[LIM_COUNT] = {
+  "acc", "traffic_light", "pedestrian", "intersection", "avoid", "highway" };
+```
+
+실제로 2026-08-10 에 enum 순서를 바꾸다가 이 둘이 어긋난 적이 있다.
+컴파일은 통과하고 **진단 로그만 조용히 엉뚱한 이름을 낸다.** 나중에
+"왜 avoid 가 이기지?" 하고 한참 헤맬 수 있는 종류의 버그다.
+
+### 3.5.6 스모크 테스트 — 어떻게 읽나
+
+가짜 제약을 쏘고 `/target_velocity` 와 `/speed_limit/active` 를 동시에 관찰한 기록이다.
+(`ego_status` 는 50km/h 고정, `acc` 는 15.28 m/s 고정)
+
+```
+  t   보낸 것                        target   winner
+  0s  acc                            13.96   acc+ramp
+  2s  acc                            15.28   acc
+  4s  acc + tl=0.0(빨간불)            0.00   traffic_light
+  6s  acc + tl 끊김                   0.00   traffic_light
+  7s  acc + tl STALE                  0.57   acc+ramp
+  9s  acc + tl STALE + ped STALE      2.57   acc+ramp
+ 10s  위와 같음                       3.57   pedestrian+ramp
+```
+
+| 시점 | 무엇을 확인한 것인가 |
+|---|---|
+| 0~2s | `13.96`(현재 속도로 시드) 에서 시작해 `15.28` 까지 **초당 1m/s** 로 오른다 |
+| 4s | 빨간불이 **한 틱에** 0 으로 떨어진다. **감속은 제한하지 않는다** |
+| 6s | 끊긴 직후. 아직 `timeout`(0.5s) 이 안 지나 여전히 유효 |
+| 7s | `Ignore` 정책이 발동해 제약에서 빠졌다. 다시 오르기 시작 |
+| 10s | `winner` 가 `pedestrian` 으로 바뀌었다 = `Conservative` 정책이 대체값(크루즈 절반 7.64)을 넣었고, 그게 `acc`(15.28)보다 낮아 이겼다 |
+
+**`+ramp` 표시**는 "이 제약이 이겼지만 상승률 제한이 더 눌렀다" 는 뜻이다.
+차가 왜 느린지가 한 줄로 나온다.
+
+### 3.5.7 새 제약을 추가하는 법
+
+네 군데만 손대면 된다. **다른 노드는 건드리지 않는다.**
+
+```
+① enum 에 LIM_XXX 추가          (기존 항목 사이에 끼우지 말 것 — winner 인덱스가 밀린다)
+② kNames 배열 같은 자리에 이름 추가
+③ 생성자에 subscribe 한 줄
+④ (선택) 끊김 정책이 다르면 on_stale / stale_value 설정
+```
+
+`combineLimits()` 는 **고치지 않는다.** 배열을 도는 함수라 항목이 늘어도 그대로 돈다.
+
+### 3.5.8 알아두면 좋은 함정
+
+| 함정 | 내용 |
+|---|---|
+| `acc_planner` 를 단독으로 못 돌린다 | 발행 토픽 기본값이 `/speed_limit/acc` 라 FSM 이 없으면 아무도 안 받는다. 단독 실행하려면 `output_topic:=/target_velocity` |
+| `alive==0` 이면 **발행을 멈춘다** | `kNoLimit`(1e6)을 내보내면 "무제한" 이 되어 위험하다. 멈추면 `path_tracker` 가 0.5초 뒤 자체 폴백(20km/h)으로 넘어간다 |
+| 정지 상태 출발이 느릴 수 있다 | `rampTarget` 이 초당 1m/s 라 0 → 15.28 에 약 15초. 규정 "1분 내 109m 통과" 에는 여유가 있지만 실주행에서 확인할 값이다 |
+| `stale_timeout` 은 전 제약 공통 | 0.5초. 제약마다 다르게 하려면 `Limit` 에 필드를 추가해야 한다 |
+
+---
+
+### 3.6 lattice_planner 에서 바뀌는 것
 
 - `/lateral_intent` 구독 → **의도 방향 후보에 가점**
 - `/lattice_status` 발행 → 의도 달성 여부 보고
