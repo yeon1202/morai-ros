@@ -12,6 +12,11 @@ ARG GID=1000
 RUN apt-get update && apt-get install -y --no-install-recommends \
       # ROS / 빌드 도구
       python3-catkin-tools python3-osrf-pycommon python3-pip \
+      # localization 스택 (autonomous_driving/launch/localization.launch 가 쓴다)
+      #   navsat_transform_node : 위경도 -> UTM52N -> 맵 로컬좌표
+      #   ekf_localization_node : IMU + GPS + 차속 융합 -> /odom
+      # 컨테이너에 직접 apt 로 넣으면 docker compose down/up 때 날아간다(2026-08-21 겪음).
+      ros-noetic-robot-localization \
       build-essential git wget curl vim nano tmux sudo \
       net-tools iputils-ping iproute2 \
       # OpenGL / GLVND (NVIDIA 드라이버 라이브러리는 컨테이너 툴킷이 주입)
