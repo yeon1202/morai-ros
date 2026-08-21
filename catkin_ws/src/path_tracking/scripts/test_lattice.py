@@ -18,6 +18,7 @@ from math import hypot
 import rospy
 from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import Float64
 from morai_msgs.msg import EgoVehicleStatus, ObjectStatusList, ObjectStatus
 from visualization_msgs.msg import MarkerArray
 
@@ -26,24 +27,29 @@ PATH_LEN   = 140           # LOCAL_PATH_SIZE
 STEP       = 0.6           # waypoint 간격 [m]
 
 
-def straight_path():
-    """+x 방향 직선 기준경로. 횡오차를 y 로 바로 읽을 수 있어 검증이 쉽다."""
+def straight_path(origin=(0.0, 0.0)):
+    """+x 방향 직선 기준경로. 횡오차를 y 로 바로 읽을 수 있어 검증이 쉽다.
+
+    origin 을 주면 그 좌표에서 시작한다. 정적장애물 미션 예외는 장애물의 절대
+    좌표로 판정하므로, 그 근처로 경로를 옮겨야 게이트가 열린다.
+    """
     p = Path()
     p.header.frame_id = 'map'
     for i in range(PATH_LEN):
         ps = PoseStamped()
         ps.header.frame_id = 'map'
-        ps.pose.position.x = i * STEP
-        ps.pose.position.y = 0.0
+        ps.pose.position.x = origin[0] + i * STEP
+        ps.pose.position.y = origin[1]
         ps.pose.orientation.w = 1.0
         p.poses.append(ps)
     return p
 
 
-def ego(speed_kmh=20.0):
+def ego(speed_kmh=20.0, y=0.0, origin=(0.0, 0.0)):
+    """y 는 기준경로에서의 횡오차. 좌측이 +, 우측이 - 다."""
     e = EgoVehicleStatus()
-    e.position.x = 0.0
-    e.position.y = 0.0
+    e.position.x = origin[0]
+    e.position.y = origin[1] + y
     e.heading = 0.0
     e.velocity.x = speed_kmh        # 브릿지가 km/h 원본을 그대로 넘긴다
     return e
@@ -75,13 +81,16 @@ def objects(items, pedestrians=()):
 class Harness:
     def __init__(self):
         self.got = None
+        self._origin = (0.0, 0.0)
         self.pub_path = rospy.Publisher('/local_path', Path, queue_size=1)
         self.pub_ego  = rospy.Publisher('/ego_status', EgoVehicleStatus, queue_size=1)
         self.pub_obj  = rospy.Publisher('/Object_topic', ObjectStatusList, queue_size=1)
         self.cands = None
         self._obs = []
+        self.avoid = None
         rospy.Subscriber('/lattice_path', Path, self.cb)
         rospy.Subscriber('/lattice_candidates', MarkerArray, self.cand_cb)
+        rospy.Subscriber('/speed_limit/avoid', Float64, self.avoid_cb)
         time.sleep(1.0)                     # 연결이 붙을 시간
 
     def cb(self, msg):
@@ -89,6 +98,9 @@ class Harness:
 
     def cand_cb(self, msg):
         self.cands = msg
+
+    def avoid_cb(self, msg):
+        self.avoid = msg.data
 
     def dump_candidates(self):
         """후보별 최종 offset 과 판정을 찍는다.
@@ -150,10 +162,31 @@ class Harness:
             worst = max(worst, v*v / R)
         return worst / 9.8
 
-    def run_case(self, name, obs, expect, tol=0.25, peds=(), speed=20.0, max_g=None):
-        """obs 를 놓고 lattice 가 고른 경로의 최대 횡변위를 잰다."""
-        path, e, o = straight_path(), ego(speed), objects(obs, peds)
+    def first_touch_x(self, poses):
+        """고른 경로가 차선을 처음 밟는 x [m]. 끝까지 안 밟으면 None.
+
+        차로 안 여유는 편도 (3.51 - 1.892)/2 = 0.809m 다. 경로의 횡변위가 이를
+        넘는 지점부터 바퀴가 실선에 닿는다. 규정은 접촉 3초당 5초라 "얼마나
+        비켜났나" 보다 "얼마나 오래 밟았나" 가 점수를 정한다.
+        """
+        LANE_EDGE = 0.809
+        for p in poses:
+            if abs(p.pose.position.y - self._origin[1]) > LANE_EDGE:
+                return p.pose.position.x - self._origin[0]
+        return None
+
+    def run_case(self, name, obs, expect, tol=0.25, peds=(), speed=20.0, max_g=None,
+                 touch_x_min=None, ego_y=0.0, origin=(0.0, 0.0), expect_avoid_kmh=None):
+        """obs 를 놓고 lattice 가 고른 경로의 최대 횡변위를 잰다.
+
+        touch_x_min 을 주면 "차선을 이보다 앞에서 밟지 않는다" 까지 함께 본다.
+        ego_y 를 주면 차를 경로에서 옆으로 띄운 채 시작한다(복귀 검증용).
+        """
+        path = straight_path(origin)
+        e = ego(speed, ego_y, origin)
+        o = objects(obs, peds)
         self._obs = list(obs)
+        self._origin = origin
         self.got = None
 
         # 입력을 충분히 쏜 뒤 "마지막" 결과를 쓴다.
@@ -172,7 +205,7 @@ class Harness:
             return False
 
         # 기준경로가 y=0 직선이므로 횡변위 = |y|. 부호도 같이 본다.
-        ys = [p.pose.position.y for p in self.got.poses]
+        ys = [p.pose.position.y - origin[1] for p in self.got.poses]
         far = max(ys, key=abs)
         ok = abs(abs(far) - abs(expect)) <= tol and (expect == 0 or far * expect > 0)
         gtxt = ''
@@ -180,6 +213,25 @@ class Harness:
             g = self.lateral_g(self.got.poses, speed)
             gtxt = '  횡가속 %.2fG(<=%.2f)' % (g, max_g)
             if g > max_g:
+                ok = False
+        if expect_avoid_kmh is not None:
+            # expect_avoid_kmh = 'inf' 이면 "제한 없음(1e6)" 을 기대한다는 뜻이다.
+            got_kmh = None if self.avoid is None else self.avoid * 3.6
+            shown = '없음' if got_kmh is None else (
+                '무제한' if got_kmh > 999 else '%.1f km/h' % got_kmh)
+            want = '무제한' if expect_avoid_kmh == 'inf' else '%.1f km/h' % expect_avoid_kmh
+            gtxt += '  avoid=%s(기대 %s)' % (shown, want)
+            if got_kmh is None:
+                ok = False
+            elif expect_avoid_kmh == 'inf':
+                ok = ok and got_kmh > 999
+            else:
+                ok = ok and got_kmh <= 999 and abs(got_kmh - expect_avoid_kmh) <= 2.0
+        if touch_x_min is not None:
+            tx = self.first_touch_x(self.got.poses)
+            gtxt += '  차선접촉 x=%s(>=%.1f)' % (
+                '%.1f' % tx if tx is not None else '없음', touch_x_min)
+            if tx is not None and tx < touch_x_min:
                 ok = False
         print('  %-30s 선택 %+6.2f m  기대 %+6.2f m  %s%s'
               % (name, far, expect, 'OK' if ok else '** 불일치 **', gtxt))
@@ -250,9 +302,63 @@ def main():
     #   장애물 때문에 즉시 차선을 침범했다. 지금은 0 이 가장 싸므로 제자리를 지킨다.
     results.append(h.run_case('60m 앞 장애물 (후보 범위 밖)', [(60.0, 0.0, 2.0)], 0.0))
 
+    # --- 기동을 늦게 시작하는가 (2026-08-19) ---
+    #
+    # 예전에는 후보 곡선이 항상 차 바로 앞(x=0)에서 시작했다. 후보 0 이 막히는
+    # 순간 곧바로 옆으로 나가기 시작하는데, 55km/h 에서 그 순간은 장애물 약 47m
+    # 앞이고 -2.0m 회피에 실제로 필요한 길이는 30.9m 뿐이다. 남는 16m 를 차선
+    # 밟은 채로 흘려보내고 있었다.
+    #
+    # 지금은 "장애물 5m 앞에서 기동이 끝나도록" 역산해 시작을 미룬다.
+    #   45m 앞 작은 상자(r=0.5, 임계 1.95m) -> -2.0m 로 통과 (2.0 > 1.95)
+    #   전이 30.9m, 시작 x≈7.8m  ->  차선 접촉은 x≈21m 부터
+    #   예전에는 전이 40.9m 를 x=0 부터 써서 접촉이 x≈17.9m 에서 시작됐다.
+    #
+    # 앞의 케이스들은 장애물이 15~35m 로 가까워 시작점이 0 으로 잘린다. 지연
+    # 경로를 실제로 타는 것은 이 케이스뿐이라, 이걸 빼면 회귀가 안 잡힌다.
+    results.append(h.run_case('45m 앞 상자 -> 늦게 시작', [(45.0, 0.0, 1.0)], -2.0,
+                              speed=55.0, max_g=0.35, touch_x_min=19.0))
+
     # 경로에서 충분히 비껴 있어 트리거조차 안 되는 장애물 -> 기준경로 그대로.
     #   임계 = 0.3 + 0.95 + 0.5 = 1.75m 이고 장애물은 2.6m 떨어져 있다.
     results.append(h.run_case('경로 옆 2.6m 장애물 (트리거 안 됨)', [(15.0, 2.6, 0.6)], 0.0))
+
+    # --- 회피가 끝난 뒤: 기준경로를 그대로 낸다 (2026-08-19) ---
+    #
+    # 장애물이 판정에서 빠지는 순간을 재현한다. 차는 아직 우측 2.3m 에 나가 있고
+    # 장애물은 없는 상태다. 이때 발행되는 것은 기준경로 그대로여야 한다(횡변위 0).
+    #
+    # ⚠️ 여기에 "복귀 곡선"(차의 현재 위치에서 시작해 기준경로로 수렴하는 경로)을
+    # 넣어봤다가 되돌렸다. 실차에서 차선 이탈이 31m/8.6초 -> 103m/12.9초 로
+    # 크게 나빠졌다. 복귀 곡선의 끝점이 "차에서 L 앞" 이라 차를 따라 도망갔고,
+    # pure_pursuit 이 보는 오차가 늘 0 에 가까워 되돌아오질 않았다.
+    # 다시 시도한다면 끝점을 도로 위 한 지점에 고정해야 한다(lattice_planner.cpp
+    # run() 주석 참고). 이 케이스는 그 회귀를 막는다.
+    results.append(h.run_case('회피 직후 -> 기준경로 그대로', [], 0.0, ego_y=-2.3, speed=38.0))
+
+    # --- 정적장애물 미션 전용 예외 (2026-08-19) ---
+    #
+    # 장애물 좌표가 시나리오의 그 정적장애물(-60.610, -142.178)일 때만
+    # "감속 요청 + 횡가속 0.5G 완화" 가 켜진다. 고주로 등 다른 구간에서 같은
+    # 처리를 하면 고속 주행 중 24km/h 상한이 걸려 훨씬 위험하기 때문이다.
+    MX, MY = -60.610, -142.178
+    MOBS = (MX, MY, 3.0)          # size 3.0 -> 반경 1.5, 임계 2.95m
+
+    # 일반 장애물에는 제한을 걸지 않는다. 이 케이스가 고주로 안전장치다.
+    results.append(h.run_case('일반 장애물 -> 감속 요청 없음', [(15.0, 0.0, 2.0)], -3.0,
+                              expect_avoid_kmh='inf'))
+
+    # 미션 장애물이 45m 앞 - 아직 멀어서 상한이 느슨하다.
+    #   d = 45.0 - 13.0(span) = 32m -> sqrt(6.78^2 + 2*2*32) = 13.2 m/s
+    results.append(h.run_case('미션 장애물 45m -> 완만한 상한', [MOBS], -3.0,
+                              speed=50.0, origin=(MX - 45.0, MY),
+                              expect_avoid_kmh=47.5))
+
+    # 미션 장애물이 13m 앞 - 기동 시작점에 닿았으므로 하한값이 나온다.
+    #   span 13m 안에 3.0m 를 0.5G 로 옮길 수 있는 속도 = sqrt(4.9*13^2/(6*3.0))
+    results.append(h.run_case('미션 장애물 13m -> 24.4km/h 하한', [MOBS], -3.0,
+                              speed=25.0, origin=(MX - 13.0, MY),
+                              expect_avoid_kmh=24.4))
 
     print('')
     ok = all(results)

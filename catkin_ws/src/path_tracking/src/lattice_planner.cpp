@@ -11,13 +11,18 @@
 #include <ros/ros.h>
 #include <nav_msgs/Path.h>
 #include <geometry_msgs/PoseStamped.h>
+#include <std_msgs/Float64.h>
 #include <morai_msgs/EgoVehicleStatus.h>
 #include <morai_msgs/ObjectStatusList.h>
 #include <morai_msgs/ObjectStatus.h>
 #include <visualization_msgs/MarkerArray.h>
+
+// "제한 없음" 약속값(1e6)을 behavior 쪽과 공유한다. 두 곳에 따로 적으면 어긋난다.
+#include "path_tracking/behavior_core.hpp"
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 
 // 차로 폭 [m]. 2026-07-31 시뮬 실측값이다.
 //   직선구간에서 차선 두 줄의 좌표 (72.85,-55.36) / (69.34,-55.44) 를 찍어
@@ -42,6 +47,9 @@ public:
     sub_obj_  = nh.subscribe("/Object_topic", 1, &LatticePlanner::objCb, this);
     pub_path_ = nh.advertise<nav_msgs::Path>("/lattice_path", 1);
     pub_cand_ = nh.advertise<visualization_msgs::MarkerArray>("/lattice_candidates", 1);
+    // 종방향 제약. behavior_fsm 이 min() 으로 합친다(설계 5.1.1 의 미구현 항목).
+    // 목표속도가 아니라 상한이다. 제한할 이유가 없으면 behavior::kNoLimit 를 계속 낸다.
+    pub_avoid_ = nh.advertise<std_msgs::Float64>("/speed_limit/avoid", 1);
     timer_ = nh.createTimer(ros::Duration(1.0 / 30.0), &LatticePlanner::run, this);
     ROS_INFO("[lattice_planner] started");
   }
@@ -56,7 +64,7 @@ private:
   // 예전에는 {-3.0, -1.75, -1.0, 1.0, 1.75, 3.0} 에 가중치 {3,2,1,1,2,3} 을 썼는데
   // 세 가지가 잘못이었다.
   //
-  //   1) 0 후보가 없었다. objectOnPath() 가 참이 되기만 하면 무조건 1m 이상
+  //   1) 0 후보가 없었다. 회피 트리거가 걸리기만 하면 무조건 1m 이상
   //      움직였다. 장애물이 경로 옆에 살짝 걸쳐 그냥 차선을 유지해도 안전한
   //      경우에도 이유 없이 옆으로 나갔다.
   //
@@ -119,14 +127,68 @@ private:
   // (8m 를 넘는 시점이 약 11km/h 이므로 그 위로는 전부 시간 기준이 지배한다).
   const double MIN_TRANSITION = 8.0;
 
+  // ---- 정적장애물 미션 전용 예외 (2026-08-19) ----
+  //
+  // 이 미션에서만 "감속 + 횡가속 완화" 를 쓴다. 다른 구간, 특히 고주로에서
+  // 같은 처리를 하면 80km/h 로 달리다 24km/h 로 기어가게 되어 훨씬 위험하다.
+  // 그래서 좌표로 못을 박는다. 일반화는 MGeo 로 차선 유무를 읽게 된 뒤에 한다.
+  //
+  // 왜 필요한가:
+  //   장애물(경로 328.9m)의 바로 앞 정지선이 315.9m 다. 그 사이 13.0m 가
+  //   교차로 안이라 차선이 없다. 회피를 그 안에서 끝내면 실선 접촉이 없다.
+  //   그런데 13m 안에 3.0m 를 옮기려면 속도를 낮추거나 횡가속을 키워야 한다.
+  //     0.3G -> 18.9 km/h,  0.5G -> 24.4 km/h,  0.7G -> 28.9 km/h
+  //   0.5G 를 택했다. 그때 최대 곡률 R=9.4m, 조향 17.7° 로 차량 한계
+  //   (최소회전반경 5.87m, 조향 40°) 안이다. 2026-07-29 에 "0.72G 는 차가 못
+  //   따라가고 밀려난다" 고 확인한 것은 고속 구간이라 여기와는 다른 영역이다.
+  //
+  //   속도 대가는 사실상 없다. ACC 가 이 장애물을 앞차로 보고 이미 17km/h 까지
+  //   떨어뜨리고 있다(2026-08-19 실측). 지금은 그 대가를 치르면서 회피는 30m
+  //   전에 시작해 이득을 하나도 못 받는 상태다.
+  const double MISSION_OBS_X = -60.610;   // 시나리오 objectList[0].pos
+  const double MISSION_OBS_Y = -142.178;
+  const double MISSION_MATCH_R = 5.0;     // 이 반경 안의 장애물이면 그 미션으로 본다
+  const double MISSION_AVOID_SPAN = 13.0; // 정지선(315.9m) ~ 장애물(328.9m)
+
+  // 회피 개시 게이트 - 이 정지선을 넘기 전에는 옆으로 나가지 않는다.
+  //
+  // 52-stopline_table.txt 의 C1256W000091 (경로 315.9m). 여기부터 교차로 안이라
+  // 차선이 없다. 감속만으로는 부족했다(2026-08-19 실측): 차가 310m 지점에서
+  // 아직 35km/h 일 때 계산된 시작점이 310.3m 라 거기서 이미 출발해버리고,
+  // 그 뒤 감속으로 시작점이 뒤로 밀려도 이미 나간 뒤였다. 그래서 위치로 막는다.
+  //
+  // 정지선에 닿았을 때 24.3km/h(실측)이므로 남은 13m 로 3.0m 를 옮기면 0.496G 다.
+  // 완화 예산 0.5G 안이라 물리적으로 가능하다 - 감속이 그 조건을 만들어준다.
+  const double MISSION_STOP_X = -59.833;
+  const double MISSION_STOP_Y = -155.393;
+  const double MISSION_STOP_MATCH_R = 3.0;  // local_path 에서 정지선을 찾는 허용 오차
+
+  // 게이트를 물고 있어도 되는 속도 초과 허용률.
+  //
+  // 우리가 요청한 상한(/speed_limit/avoid)을 차가 이 배수 안에서 따라오고 있으면
+  // 정지선 도착 속도가 보장되므로 게이트를 유지한다. 벗어나 있으면 감속이 안 걸린
+  // 것이므로 게이트를 놓고 일찍 나간다 - 따라갈 수 없는 경로를 명령해 회피가
+  // 실패하는 것보다 낫다. 차선 접촉(3초당 5초)보다 충돌(15초)이 훨씬 비싸다.
+  const double GATE_SPEED_TOLERANCE = 1.15;
+  const double AVOID_ACCEL_LIMIT = 4.90;  // 0.5G. 회피 기동 전용(크루즈 곡률제한은 0.3G 그대로)
+  const double AVOID_BRAKE_ACCEL = 2.0;   // 감속 상한을 거리로 풀 때 쓰는 감속도. ACC 와 같은 값
+
+  // 회피 기동을 장애물 이만큼 앞에서 끝낸다 [m].
+  // 차 길이가 4.635m 라 대략 한 대분이다. 0 으로 두면 장애물과 나란해지는 순간에야
+  // 목표 offset 에 도달해 여유가 없다. 시뮬에서 조정할 값이다.
+  const double COMPLETE_MARGIN = 5.0;
+
   ros::Subscriber sub_path_, sub_ego_, sub_obj_;
-  ros::Publisher pub_path_, pub_cand_;
+  ros::Publisher pub_path_, pub_cand_, pub_avoid_;
   ros::Timer timer_;
   nav_msgs::Path local_path_;
   morai_msgs::EgoVehicleStatus ego_;
   morai_msgs::ObjectStatusList objs_;
   bool has_path_ = false, has_ego_ = false, has_obj_ = false;
   bool cand_shown_ = false;   // RViz 에 후보 마커가 떠 있는 상태인가
+  // 후보별 요구 횡가속도 [m/s^2]. generateCandidates 가 채우고 run 이 고른 것만 본다.
+  std::vector<double> cand_accel_;
+  double cand_accel_limit_ = 2.94;   // 그때 적용한 예산(미션이면 완화값)
 
   void pathCb(const nav_msgs::Path::ConstPtr& m) { local_path_ = *m; has_path_ = true; }
   void egoCb(const morai_msgs::EgoVehicleStatus::ConstPtr& m) { ego_ = *m; has_ego_ = true; }
@@ -142,7 +204,7 @@ private:
   //   신호를 위반하며 뛰어드는 사람이라, 옆으로 꺾으면 사람이 뛰어든 쪽으로
   //   들어갈 수도 있고 반대 차로로 나갈 수도 있다. 정답은 급정지이고 그건
   //   behavior FSM / ACC 몫이다.
-  //   그래서 보행자는 회피를 촉발하지 않는다(objectOnPath 에서 제외).
+  //   그래서 보행자는 회피를 촉발하지 않는다(blockedSpan 에서 제외).
   //   다만 다른 이유로 이미 회피 중이라면 보행자를 뚫고 가는 후보를 고르면
   //   안 되므로, 후보 충돌 검사에는 포함한다.
   std::vector<Obs> gatherObstacles(bool with_pedestrian)
@@ -161,24 +223,103 @@ private:
     return v;
   }
 
-  // 기준경로 위에 장애물이 있나? (회피 트리거)
-  bool objectOnPath(const std::vector<Obs>& obs)
+  // 트리거 장애물이 "그 정적장애물 미션" 인가? 좌표로 판정한다.
+  //
+  // 자차 위치가 아니라 장애물 위치로 보는 이유: 장애물이 곧 그 미션의 정체다.
+  // 자차 기준으로 구간을 잡으면 그 구간에 들어온 다른 물체(NPC 등)에까지
+  // 예외가 적용된다.
+  bool isMissionObstacle(const std::vector<Obs>& obs) const
   {
-    for (const auto& p : local_path_.poses)
+    for (const auto& o : obs)
+      if (std::hypot(o.x - MISSION_OBS_X, o.y - MISSION_OBS_Y) < MISSION_MATCH_R)
+        return true;
+    return false;
+  }
+
+  // 정지선이 지금 local_path 위 어디인가 [m]. 시야 밖이면 -1.
+  //
+  // local_path 가 월드 좌표라 좌표만 알면 그 위에서 바로 찾을 수 있다.
+  // path_tracker 가 전역 인덱스를 따로 발행할 필요가 없다.
+  double stoplineS(const std::vector<double>& cum) const
+  {
+    int best = -1;
+    double bd = MISSION_STOP_MATCH_R;
+    for (std::size_t i = 0; i < local_path_.poses.size(); ++i) {
+      double d = std::hypot(local_path_.poses[i].pose.position.x - MISSION_STOP_X,
+                            local_path_.poses[i].pose.position.y - MISSION_STOP_Y);
+      if (d < bd) { bd = d; best = static_cast<int>(i); }
+    }
+    return (best < 0) ? -1.0 : cum[best];
+  }
+
+  // 기준경로의 누적거리 [m].
+  //
+  // 후보별 전이 길이와 기동 시작점을 "몇 번째 점" 이 아니라 "몇 m" 로 재기 위해
+  // 한 번 만들어 돌려 쓴다. waypoint 간격이 바뀌어도 거동이 안 바뀌는 이유다.
+  std::vector<double> cumulativeS() const
+  {
+    const int n = local_path_.poses.size();
+    std::vector<double> cum(n, 0.0);
+    for (int i = 1; i < n; ++i)
+      cum[i] = cum[i-1] + std::hypot(
+          local_path_.poses[i].pose.position.x - local_path_.poses[i-1].pose.position.x,
+          local_path_.poses[i].pose.position.y - local_path_.poses[i-1].pose.position.y);
+    return cum;
+  }
+
+  // 기준경로가 장애물에 막히는 구간 [m]. 막힌 곳이 없으면 valid=false.
+  struct Span {
+    bool   valid = false;
+    double s_first = 0.0;   // 판정원에 들어가는 첫 점
+    double s_last  = 0.0;   // 빠져나오는 마지막 점
+    double mid() const { return 0.5 * (s_first + s_last); }   // 장애물의 경로상 위치
+  };
+
+  // 처음 막히는 "구간" 을 찾는다. 두 번째 장애물까지 삼키지 않도록 첫 연속 구간만.
+  //
+  // 예전 objectOnPath() 는 "있다/없다" 만 돌려줬다. 회피 기동을 장애물 기준으로
+  // 배치하려면 위치가 필요해서 값으로 바꿨고, 그 다음엔 끝(s_last)도 필요해졌다.
+  // offset 을 유지할 구간이 "장애물을 지날 때까지" 여야 하기 때문이다. 판정식 자체는
+  // 처음 그대로다.
+  Span blockedSpan(const std::vector<Obs>& obs, const std::vector<double>& cum)
+  {
+    Span sp;
+    auto blocked = [&](std::size_t i) {
+      const auto& p = local_path_.poses[i];
       for (const auto& o : obs) {
         double d = std::hypot(p.pose.position.x - o.x, p.pose.position.y - o.y);
         if (d < o.r + CAR_HALF_WIDTH + SAFE_MARGIN) return true;
       }
-    return false;
+      return false;
+    };
+    for (std::size_t i = 0; i < local_path_.poses.size(); ++i) {
+      if (!blocked(i)) continue;
+      sp.valid = true;
+      sp.s_first = cum[i];
+      sp.s_last  = cum[i];
+      for (std::size_t j = i + 1; j < local_path_.poses.size(); ++j) {
+        if (!blocked(j)) break;
+        sp.s_last = cum[j];
+      }
+      break;
+    }
+    return sp;
   }
 
   // 후보 경로 생성 (기준경로 시작점 기준 local 프레임 -> 3차곡선 -> map 복귀)
   // offset 0 후보도 의미가 있다. 3차곡선이 차의 현재 횡위치(egoy)에서 기준경로로
   // 부드럽게 복귀시키므로, "그대로 간다" 가 곧 "제 차선으로 돌아온다" 가 된다.
-  std::vector<nav_msgs::Path> generateCandidates()
+  std::vector<nav_msgs::Path> generateCandidates(const std::vector<double>& cum, const Span& sp,
+                                                 bool mission)
   {
     std::vector<nav_msgs::Path> out;
     const int n = local_path_.poses.size();
+    if (n < 3) return out;
+
+    // 기동에 쓸 횡가속도 예산. 정적장애물 미션에서만 0.5G 로 완화한다(상수 주석 참고).
+    const double a_lat = mission ? AVOID_ACCEL_LIMIT : LAT_ACCEL_LIMIT;
+    // 회피 개시 게이트(정지선) 위치. 미션이 아니거나 시야 밖이면 -1.
+    const double s_gate = mission ? stoplineS(cum) : -1.0;
 
     // /ego_status 의 velocity 는 MORAI UDP 원본이라 이미 km/h 다(브릿지가 변환 안 함).
     // 예전엔 이걸 m/s 로 착각하고 3.6을 또 곱해서 전방주시거리가 3.6배로 부풀어 있었다.
@@ -201,60 +342,182 @@ private:
     // LAT_ACCEL_LIMIT 이하로 두면 L = v * sqrt(6*D/a) 가 되어 속도가 상쇄되고,
     // 남는 것은 "시간" 뿐이다. 그래서 속도와 무관하게 횡가속도가 일정해진다.
     //   D=3.51m, a=2.94 -> T = 2.68초 (20km/h 에서 15m, 55km/h 에서 41m)
+    //
+    // 2026-08-19: 이 길이를 여섯 후보가 공유하던 것을 후보별로 나눴다. 아래 ① 참고.
+
+    // 후보 0(제자리)의 도달거리 = 탐지 지평.
+    //
+    // 후보 0 이 막히는 순간이 곧 "회피해야 한다" 는 신호다. 여기를 짧게 잡으면
+    // 가장 큰 회피(3.51m)를 시작하기에 이미 늦은 시점에야 알아차린다. 그래서
+    // 이 후보만은 최대 offset 기준(d_max) 길이를 그대로 쓴다.
     double d_max = 0.0;
     for (double off : LANE_OFFSET) d_max = std::max(d_max, std::fabs(off));
-    const double T = std::sqrt(6.0 * d_max / LAT_ACCEL_LIMIT);
-    double xf_want = std::max(v_mps * T, MIN_TRANSITION);
+    const double reach0 = std::max(v_mps * std::sqrt(6.0 * d_max / LAT_ACCEL_LIMIT),
+                                   MIN_TRANSITION);
 
-    // 누적 거리로 끝점 인덱스를 찾는다. 개수가 아니라 거리로 재므로 waypoint
-    // 간격이 달라져도 거동이 바뀌지 않는다.
-    int end_idx = 1;
-    double acc_len = 0.0;
-    for (int i = 1; i < n; ++i) {
-      acc_len += std::hypot(
-          local_path_.poses[i].pose.position.x - local_path_.poses[i-1].pose.position.x,
-          local_path_.poses[i].pose.position.y - local_path_.poses[i-1].pose.position.y);
-      end_idx = i;
-      if (acc_len >= xf_want) break;
-    }
-    if (end_idx < 2) return out;                     // 경로가 너무 짧다
-
-    // 좌표변환: 시작점 + 진행방향 theta
-    double sx = local_path_.poses[0].pose.position.x;
-    double sy = local_path_.poses[0].pose.position.y;
-    double nx = local_path_.poses[1].pose.position.x;
-    double ny = local_path_.poses[1].pose.position.y;
-    double theta = std::atan2(ny - sy, nx - sx);
-    double c = std::cos(theta), s = std::sin(theta);
-
-    // world -> local (역변환)
-    auto toLocal = [&](double x, double y, double& lx, double& ly) {
-      double dx = x - sx, dy = y - sy;
-      lx =  c * dx + s * dy;
-      ly = -s * dx + c * dy;
-    };
-    // local -> world
-    auto toWorld = [&](double lx, double ly, double& x, double& y) {
-      x = sx + c * lx - s * ly;
-      y = sy + s * lx + c * ly;
-    };
-
-    double ex, ey; toLocal(local_path_.poses[end_idx].pose.position.x,
-                           local_path_.poses[end_idx].pose.position.y, ex, ey);
-    double egox, egoy; toLocal(ego_.position.x, ego_.position.y, egox, egoy);
+    cand_accel_.clear();
+    cand_accel_limit_ = a_lat;
 
     for (double off : LANE_OFFSET) {
       nav_msgs::Path cand;
       cand.header.frame_id = "map";
+      const double a_off = std::fabs(off);
+      // 후보마다 정확히 하나. 중간에 continue 로 빠져도 인덱스가 어긋나지 않도록
+      // 먼저 자리를 잡아두고 나중에 채운다.
+      cand_accel_.push_back(0.0);
+
+      // ① 이 후보가 실제로 필요한 전이 길이.
+      //
+      // 예전에는 여섯 후보가 전부 d_max(3.51m) 기준 길이를 같이 썼다. 2.0m 만
+      // 옮기면 되는 후보도 3.51m 용 길이를 쓰니 횡가속도가 예산(0.30G)의 절반
+      // 밖에 안 나왔고(55km/h 에서 0.17G) 그만큼 기동이 길게 늘어져 있었다.
+      // offset 마다 따로 구하면 모든 후보가 균일하게 0.3G 를 쓴다.
+      //   55km/h:  1.0m -> 21.8m,  2.0m -> 30.9m,  3.51m -> 40.9m (예전엔 전부 40.9m)
+      const double L = (a_off < 1e-9)
+          ? reach0
+          : std::max(v_mps * std::sqrt(6.0 * a_off / a_lat), MIN_TRANSITION);
+
+      // ② 기동을 최대한 늦게 시작한다.
+      //
+      // 예전에는 후보 곡선이 항상 차 바로 앞(x=0)에서 시작했다. 후보 0 이 막히는
+      // 순간(55km/h 에서 장애물 약 47m 앞) 곧바로 옆으로 나가기 시작하는데 실제로
+      // 필요한 길이는 30.9m 뿐이라, 남는 16m 를 차선 밟은 채로 흘려보내고 있었다.
+      //
+      // 차로 안 여유가 편도 0.809m 뿐이라(차폭 1.892 / 차로 3.51) 일찍 나갈수록
+      // 실선 접촉 시간이 그대로 늘어난다. 규정은 접촉 3초당 5초다.
+      //
+      // 그래서 "장애물 COMPLETE_MARGIN 앞에서 기동이 끝나도록" 역산해 시작점을
+      // 뒤로 민다. 그 전까지는 기준경로를 그대로 따라간다.
+      //
+      // ①만 하고 이걸 안 하면 오히려 나빠진다. 시작이 그대로인 채 전이만
+      // 짧아져서 목표 offset 에 더 빨리 도달하기 때문이다. 둘은 한 세트다.
+      //
+      // ⚠️ 2026-08-19 정정. 처음엔 x_start 만 뒤로 밀고 끝점을 x_start + L 로 뒀는데,
+      // 여유가 없어 x_start 가 0 으로 잘리면 **끝점이 "차에서 L 앞" 이 되어 차를
+      // 따라다녔다.** 차가 1m 가면 끝점도 1m 도망가서 영영 도달하지 못한다.
+      // 실측에서 장애물 32.5m 전부터 끝점이 장애물 뒤로 넘어갔고, 계속 밀려서
+      // 옆을 지날 때는 18.9m 뒤에 있었다. 그래서 차는 곡선의 완만한 앞부분만
+      // 밟았고 -3.00m 명령에 -2.36m 밖에 도달하지 못했다(0.64m 미달).
+      //
+      // 그런데 selectLane 은 자기가 그린 경로(-3.00m 도달)로 충돌을 판정하므로
+      // "0.80m 여유로 통과" 라고 봤다. 실제 여유는 0.18m 였다. **planner 가 조용히
+      // 낙관적으로 틀린다.** 그래서 끝점을 도로 위 한 지점에 못박는다.
+      //
+      // 우선순위: ① 장애물 옆에 닿기 전에 끝낸다  ② 0.3G 를 지킨다  ③ 여유를 둔다
+      // 셋을 다 못 지키면 ③부터 버린다. ②까지 버려야 하면 그건 "제때 못 피한다" 는
+      // 뜻이고, 조용히 넘어가지 않도록 경고를 낸다.
+      double x_end, hold_end;
+      if (a_off < 1e-9) {
+        // 후보 0 은 기동이 아니라 탐지 지평이다. 차 기준이 맞다.
+        x_end    = reach0;
+        hold_end = reach0;   // 아래에서 TAIL_EXTEND 로 조금 연장한다
+      } else {
+        const double s_mid = sp.mid();                       // 장애물의 경로상 위치
+        x_end = std::min(s_mid, std::max(s_mid - COMPLETE_MARGIN, L));
+        x_end = std::max(x_end, 2.0);                        // 퇴화 방지
+        // 유지 구간: 장애물을 완전히 지날 때까지 offset 을 물고 간다.
+        // 이게 없으면 후보 경로가 장애물 최근접점 앞에서 끊겨, 충돌검사가
+        // "안 부딪힌다" 고 잘못 판정한다(경로가 거기까지 안 가니까).
+        hold_end = std::max(x_end, sp.s_last + COMPLETE_MARGIN);
+      }
+      double x_start = (a_off < 1e-9) ? 0.0 : std::max(0.0, x_end - L);
+
+      // 미션 게이트: 정지선을 넘기 전에는 옆으로 나가지 않는다.
+      //
+      // 감속만으로는 부족하다. 시작점은 매 틱 현재 속도로 계산되는데, 차가 아직
+      // 빠를 때 계산된 이른 시작점을 한 번 지나가 버리면 그걸로 끝이다. 위치로
+      // 막아야 "정지선 이후" 가 보장된다.
+      //
+      // 남은 거리로 감당이 안 되면(감속이 안 걸린 경우) 게이트를 놓는다.
+      // 따라갈 수 없는 경로를 명령해 회피가 실패하는 것보다는 일찍 나가는 편이 낫다.
+      // 해제 판정은 **지금 속도가 아니라 감속 계획을 지키고 있는지**로 한다.
+      //
+      // 지금 속도로 재면 항상 풀린다. 정지선 20m 전에서 38km/h 면 남은 13m 로는
+      // 1.24G 가 필요하지만, 정작 정지선에 도착할 땐 24km/h 라 0.5G 로 된다.
+      // 그래서 "우리가 요청한 상한을 차가 따라오고 있는가" 를 본다.
+      // 따라오고 있으면 도착 시점 속도가 보장되므로 게이트를 물고,
+      // 벗어나 있으면(감속이 안 걸림) 게이트를 놓고 일찍 나간다.
+      if (mission && a_off > 1e-9 && s_gate >= 0.0 && s_gate > x_start) {
+        const double v_allow = missionSpeedLimit(sp, off);
+        const double span = x_end - s_gate;
+        if (span > 1.0 && v_mps <= v_allow * GATE_SPEED_TOLERANCE) {
+          x_start = s_gate;
+        } else {
+          ROS_WARN_THROTTLE(1.0,
+              "[lattice] stopline gate released: v=%.1f > allow %.1f km/h (span %.1fm)",
+              v_mps * 3.6, v_allow * 3.6, span);
+        }
+      }
+
+      // 거리 -> 인덱스
+      int i_start = 0;
+      while (i_start + 1 < n && cum[i_start] < x_start) ++i_start;
+      int i_end = i_start;
+      while (i_end + 1 < n && cum[i_end] < x_end) ++i_end;
+      if (i_end < i_start + 2) { out.push_back(cand); continue; }  // 남은 경로가 짧다
+      int i_hold = i_end;
+      while (i_hold + 1 < n && cum[i_hold] < hold_end) ++i_hold;
+
+      // 기동 전 구간은 기준경로를 그대로 붙인다. 회피할 이유가 없을 때 raw
+      // local_path 를 내보내는 것과 같은 상태이므로 새로 만들 것이 없다.
+      for (int i = 0; i < i_start; ++i) cand.poses.push_back(local_path_.poses[i]);
+
+      // 좌표변환 기준을 기동 시작점으로 잡는다. 직선 프레임을 47m 씩 끌고 가면
+      // 곡선 구간에서 오차가 커지므로, 시작점을 뒤로 옮기는 편이 오히려 정확하다.
+      double sx = local_path_.poses[i_start].pose.position.x;
+      double sy = local_path_.poses[i_start].pose.position.y;
+      double nx = local_path_.poses[i_start + 1].pose.position.x;
+      double ny = local_path_.poses[i_start + 1].pose.position.y;
+      double theta = std::atan2(ny - sy, nx - sx);
+      double c = std::cos(theta), sn = std::sin(theta);
+
+      // world -> local (역변환)
+      auto toLocal = [&](double x, double y, double& lx, double& ly) {
+        double dx = x - sx, dy = y - sy;
+        lx =  c * dx + sn * dy;
+        ly = -sn * dx + c * dy;
+      };
+      // local -> world
+      auto toWorld = [&](double lx, double ly, double& x, double& y) {
+        x = sx + c * lx - sn * ly;
+        y = sy + sn * lx + c * ly;
+      };
+
+      double ex, ey; toLocal(local_path_.poses[i_end].pose.position.x,
+                             local_path_.poses[i_end].pose.position.y, ex, ey);
       double xf = ex;
-      double ps = egoy;          // 시작 횡위치 (현재 차)
-      double pf = ey + off;      // 끝 횡위치 (offset)
       if (xf < 1.0) { out.push_back(cand); continue; }
+
+      // 시작 횡위치.
+      //   지연 없이 지금 시작하는 경우(i_start==0)에만 차의 실제 횡위치에서
+      //   출발한다. 그래야 offset 0 후보가 "제 차선으로 부드럽게 복귀" 를
+      //   표현하고, 이미 회피 중일 때도 지금 있는 자리에서 이어진다.
+      //   지연된 경우엔 그 지점까지 기준경로를 따라가 있으므로 0 에서 시작한다.
+      double ps = 0.0;
+      if (i_start == 0) {
+        double egox, egoy;
+        toLocal(ego_.position.x, ego_.position.y, egox, egoy);
+        ps = egoy;
+      }
+      double pf = ey + off;      // 끝 횡위치 (offset)
 
       // 3차곡선: y(0)=ps, y'(0)=0, y(xf)=pf, y'(xf)=0
       double a0 = ps, a1 = 0.0;
       double a2 = 3.0 * (pf - ps) / (xf * xf);
       double a3 = -2.0 * (pf - ps) / (xf * xf * xf);
+
+      // 이 곡선이 실제로 요구하는 횡가속도. 최대 곡률이 6*D/L^2 이므로 v^2 를 곱한다.
+      //
+      // 예산(0.3G)을 넘으면 "제때 못 피한다" 는 뜻이다. 예전에는 끝점이 도망가느라
+      // 이 상황이 아예 드러나지 않았다 - 항상 여유로운 곡선을 그려놓고 그 앞부분만
+      // 밟았기 때문이다. 이제는 숫자로 나온다.
+      //
+      // 여기서 바로 경고하지 않고 후보별로 담아두는 이유: 못 피하는 작은 offset
+      // (-1.0 등)은 늘 압축돼 한계를 넘는데, 어차피 선택되지 않는다. 그것까지
+      // 경고하면 진짜 위험한 경우가 묻힌다. run() 에서 **고른 후보만** 본다.
+      cand_accel_.back() = (xf > 1e-6)
+          ? 6.0 * std::fabs(pf - ps) / (xf * xf) * v_mps * v_mps
+          : 0.0;
 
       for (double x = 0.0; x < xf; x += X_INTERVAL) {
         double y = a3 * x * x * x + a2 * x * x + a1 * x + a0;
@@ -284,8 +547,14 @@ private:
       //   속도 비례로 바꾸면서 저속에서 15m 로 짧아졌다. 그러면 tail 이 장애물
       //   바로 위에서 시작해, 애써 비켜난 경로가 그 자리에서 원래 차선으로
       //   되돌아가 버린다. 즉 회피가 무효가 된다.
+      //
+      // 2026-08-19: 회피 후보는 i_hold(장애물 통과 지점)까지, 후보 0 은 예전처럼
+      // TAIL_EXTEND 만큼만 연장한다. 후보 0 을 길게 늘이면 탐지 지평이 함께 늘어나
+      // 먼 장애물에 회피가 조기 발동한다.
       const int TAIL_EXTEND = 12;
-      for (int i = end_idx; i < n && i < end_idx + TAIL_EXTEND; ++i) {
+      const int tail_last = (a_off < 1e-9) ? std::min(n - 1, i_end + TAIL_EXTEND - 1)
+                                           : i_hold;
+      for (int i = i_end; i <= tail_last && i < n; ++i) {
         // 경로 접선 -> 좌측 법선. 법선 방향으로 off 만큼 민다.
         int a = (i > 0) ? i - 1 : i;
         int b = (i + 1 < n) ? i + 1 : i;
@@ -391,6 +660,36 @@ private:
     cand_shown_ = true;
   }
 
+  void publishAvoidLimit(double v)
+  {
+    std_msgs::Float64 m; m.data = v;
+    pub_avoid_.publish(m);
+  }
+
+  // 정적장애물 미션에서 "회피를 MISSION_AVOID_SPAN 안에서 끝내려면" 허용되는 속도.
+  //
+  // 두 단계다.
+  //   ① 기동 자체가 요구하는 속도
+  //        span 안에 D 를 옮길 때 횡가속도 = 6*D/span^2 * v^2 <= a
+  //        -> v_avoid = sqrt(a * span^2 / (6*D))
+  //        D=3.0m, span=13.0m, a=0.5G -> 6.78 m/s = 24.4 km/h
+  //   ② 지금 당장 그 속도일 필요는 없다. 기동 시작점까지 d 남았으면 그동안 줄이면 된다.
+  //        v_now <= sqrt(v_avoid^2 + 2*a_brake*d)
+  //        50m 남으면 56km/h(사실상 무제한), 20m 40km/h, 10m 33km/h, 0m 24.4km/h
+  //
+  // ②가 없으면 장애물이 local_path 에 들어오는 70m 전부터 24km/h 로 기어간다.
+  // acc_core 의 curvatureSpeedLimit() 과 같은 꼴이라 "이제 감속 시작" 판단이 필요 없다.
+  double missionSpeedLimit(const Span& sp, double off) const
+  {
+    const double D = std::fabs(off);
+    if (D < 1e-9) return behavior::kNoLimit;              // 회피 안 함 -> 제한할 이유 없음
+
+    const double v_avoid = std::sqrt(AVOID_ACCEL_LIMIT * MISSION_AVOID_SPAN * MISSION_AVOID_SPAN
+                                     / (6.0 * D));
+    const double d = std::max(0.0, sp.mid() - MISSION_AVOID_SPAN);   // 기동 시작점까지
+    return std::sqrt(v_avoid * v_avoid + 2.0 * AVOID_BRAKE_ACCEL * d);
+  }
+
   void run(const ros::TimerEvent&)
   {
     if (!(has_path_ && has_ego_ && has_obj_)) return;
@@ -398,21 +697,66 @@ private:
     // 회피를 촉발할 대상: NPC + 정적장애물 (보행자 제외 - 보행자는 정지 대상)
     std::vector<Obs> trigger_obs = gatherObstacles(false);
 
-    // 회피할 이유가 없으면 기준경로 그대로 (lattice 안 돌림)
-    if (trigger_obs.empty() || !objectOnPath(trigger_obs)) {
+    // 경로 누적거리와 "처음 막히는 구간". 기동을 장애물 기준으로 배치하는 데 쓴다.
+    std::vector<double> cum = cumulativeS();
+    Span sp = blockedSpan(trigger_obs, cum);
+
+    // 회피할 이유가 없으면 기준경로 그대로 (lattice 안 돌림).
+    //
+    // ⚠️ 2026-08-19 실패 기록. 여기서 "복귀 곡선"(차의 현재 횡위치에서 시작해
+    // 기준경로로 수렴하는 경로)을 내보내 봤다. 회피가 끝나는 순간 경로가 한 틱에
+    // 횡으로 점프하는 것을 없애려는 의도였다.
+    //
+    // 실차에서 크게 나빠졌다. 차선 이탈이 31m/8.6초 -> **103m/12.9초** 가 됐다.
+    // 이유는 이 파일에서 방금 고친 것과 같은 버그였다 - 복귀 곡선의 끝점도
+    // "차에서 L 앞" 이라 차를 따라 도망갔다. 매 틱 차 위치에서 다시 그려지니
+    // pure_pursuit 이 보는 오차가 늘 0 에 가깝고, 그래서 되돌아오질 않았다.
+    // (50km/h, 횡오차 3m 면 L=34m. 331m 에서 3.16m 였던 CTE 가 413m 에서야
+    //  0.809m 아래로 내려왔다.)
+    //
+    // 다시 만들려면 **끝점을 도로 위 한 지점에 고정**해야 한다. 회피가 끝나는
+    // 순간의 위치를 걸어두고(latch), 거기서 L 떨어진 지점을 목표로 삼아 남은
+    // 거리를 매 틱 줄여가는 방식이어야 한다. 차가 다가갈수록 곡선이 가팔라져
+    // 실제로 수렴한다. 지금 방식은 그 반대였다.
+    //
+    // 그때까지는 기준경로를 그대로 낸다. 회피 직후 한 틱 점프하고 pure_pursuit 이
+    // 과보정해 CTE 가 0.2~0.5m 진동하지만(속도 비례), 차로 여유 0.809m 안이다.
+    if (trigger_obs.empty() || !sp.valid) {
       pub_path_.publish(local_path_);
+      publishAvoidLimit(behavior::kNoLimit);   // 제한 없음. 지나고 나면 여기로 돌아온다
       clearCandidates();
       return;
     }
 
-    std::vector<nav_msgs::Path> cands = generateCandidates();
-    if (cands.empty()) { pub_path_.publish(local_path_); clearCandidates(); return; }
+    // 정적장애물 미션에서만 예외 처리(감속 + 횡가속 완화). 좌표로 판정한다.
+    const bool mission = isMissionObstacle(trigger_obs);
+
+    std::vector<nav_msgs::Path> cands = generateCandidates(cum, sp, mission);
+    if (cands.empty()) {
+      pub_path_.publish(local_path_);
+      publishAvoidLimit(behavior::kNoLimit);
+      clearCandidates();
+      return;
+    }
 
     // 후보 충돌 검사에는 보행자도 포함한다. 이미 회피 중이라면 보행자를 뚫고
     // 가는 후보를 고르면 안 된다.
     std::vector<Obs> obs = gatherObstacles(true);
     std::vector<bool> blocked;
     int best = selectLane(cands, obs, blocked);
+
+    // 고른 경로가 예산을 넘게 꺾어야 하면 "제때 못 피한다" 는 뜻이다. 차가 명령을
+    // 못 따라가 실제 여유가 계산보다 줄어든다.
+    if (best < static_cast<int>(cand_accel_.size()) && cand_accel_[best] > cand_accel_limit_)
+      ROS_WARN_THROTTLE(1.0,
+          "[lattice] chosen offset needs %.2f m/s^2 (limit %.2f) - too late to avoid smoothly",
+          cand_accel_[best], cand_accel_limit_);
+
+    // 종방향 요청: 이 회피를 정해진 구간 안에서 끝내려면 얼마나 느려야 하는가.
+    //
+    // 미션 구간에서만 낸다. 고주로 등에서 같은 처리를 하면 고속 주행 중에 24km/h
+    // 상한이 걸려 훨씬 위험하다.
+    publishAvoidLimit(mission ? missionSpeedLimit(sp, LANE_OFFSET[best]) : behavior::kNoLimit);
 
     pub_path_.publish(cands[best]);          // 선택 경로 -> 제어
     publishCandidates(cands, best, blocked); // 후보 전체 -> RViz
