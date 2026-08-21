@@ -178,6 +178,32 @@ private:
   // 목표 offset 에 도달해 여유가 없다. 시뮬에서 조정할 값이다.
   const double COMPLETE_MARGIN = 5.0;
 
+  // ---- 복귀 곡선 (2026-08-21) ----
+  //
+  // 회피가 끝나면 차는 아직 옆으로 나가 있는데, 예전에는 기준경로 원본을 그대로
+  // 냈다. 그러면 명령 경로가 한 틱에 횡으로 점프하고 pure_pursuit 이 과보정한다.
+  // 실측(logs/lap_gate3.csv, 38km/h): 도착각 27도, 반대쪽으로 1.21m 오버슈트,
+  // 차로 여유 0.809m 를 7.5m / 1.29초 초과. 넘어가는 방향이 하필 황색 중앙선이다.
+  //
+  // 2026-08-19 에 한 번 넣었다가 되돌렸다. 그때는 복귀 곡선의 끝점도 "차에서
+  // L 앞" 이라 차를 따라 도망갔다. 매 틱 차 위치에서 다시 그려지니 pure_pursuit
+  // 이 보는 오차가 늘 0 에 가깝고, 그래서 되돌아오질 않았다(31m -> 103m 악화).
+  //
+  // 이번에는 회피 후보와 같은 방식으로 **목표점을 도로 위에 못박는다**. 한 번
+  // 걸어두면 차가 다가갈수록 남은 거리가 줄어 곡선이 가팔라지고, 그래서 실제로
+  // 수렴한다. 8/19 방식과 정확히 반대 방향이다.
+  const double RETURN_DONE     = 0.25;  // 이 안이면 복귀 완료. 기준경로 원본을 낸다 [m]
+  const double RETURN_MIN_SPAN = 3.0;   // 목표점이 이보다 가까우면 놓고 다시 건다 [m]
+
+  // 복귀 전이 길이를 정하는 횡가속 예산 [m/s^2]. 0.3G.
+  //
+  // 여기가 이 기능의 유일한 튜닝 손잡이다. 크게 잡으면 복귀가 짧고 가팔라져
+  // 차선 밖에 있는 시간이 줄지만 오버슈트가 남고, 작게 잡으면 부드러운 대신
+  // 차선 밖에 오래 있는다. 규정이 접촉 3초당 5초라 "부드러움" 이 아니라
+  // **여유 초과 총 거리**로 정해야 한다. 우선 회피와 같은 0.3G 로 두고
+  // 실측(lap CSV 의 0.809m 초과 거리)으로 조정한다.
+  const double RETURN_ACCEL_LIMIT = 2.94;
+
   ros::Subscriber sub_path_, sub_ego_, sub_obj_;
   ros::Publisher pub_path_, pub_cand_, pub_avoid_;
   ros::Timer timer_;
@@ -189,6 +215,14 @@ private:
   // 후보별 요구 횡가속도 [m/s^2]. generateCandidates 가 채우고 run 이 고른 것만 본다.
   std::vector<double> cand_accel_;
   double cand_accel_limit_ = 2.94;   // 그때 적용한 예산(미션이면 완화값)
+
+  // 복귀 목표점 (world). ret_active_ 인 동안 도로 위에 고정된다.
+  // 차가 아니라 도로를 기준으로 잡는 것이 이 기능의 핵심이다.
+  bool   ret_active_ = false;
+  double ret_x_ = 0.0, ret_y_ = 0.0;
+  // 직전에 회피하던 것이 미션 장애물이었나. 복귀 예산을 정하는 데 쓴다.
+  bool   last_mission_ = false;   // 매 틱 갱신
+  bool   ret_mission_  = false;   // latch 시점에 걸어두고 복귀가 끝날 때까지 유지
 
   void pathCb(const nav_msgs::Path::ConstPtr& m) { local_path_ = *m; has_path_ = true; }
   void egoCb(const morai_msgs::EgoVehicleStatus::ConstPtr& m) { ego_ = *m; has_ego_ = true; }
@@ -690,6 +724,123 @@ private:
     return std::sqrt(v_avoid * v_avoid + 2.0 * AVOID_BRAKE_ACCEL * d);
   }
 
+  // 복귀 곡선을 만든다. 만들 필요가 없으면(이미 차로 안) false 를 돌려주고,
+  // 그때는 호출자가 기준경로 원본을 낸다.
+  //
+  // 좌표 프레임은 generateCandidates 와 같은 방식으로 기준경로 시작점에 잡는다.
+  bool buildReturnPath(nav_msgs::Path& out)
+  {
+    const int n = static_cast<int>(local_path_.poses.size());
+    if (n < 3) return false;
+
+    const double sx = local_path_.poses[0].pose.position.x;
+    const double sy = local_path_.poses[0].pose.position.y;
+    const double nx = local_path_.poses[1].pose.position.x;
+    const double ny = local_path_.poses[1].pose.position.y;
+    const double theta = std::atan2(ny - sy, nx - sx);
+    const double c = std::cos(theta), sn = std::sin(theta);
+
+    auto toLocal = [&](double x, double y, double& lx, double& ly) {
+      const double dx = x - sx, dy = y - sy;
+      lx =  c * dx + sn * dy;
+      ly = -sn * dx + c * dy;
+    };
+    auto toWorld = [&](double lx, double ly, double& x, double& y) {
+      x = sx + c * lx - sn * ly;
+      y = sy + sn * lx + c * ly;
+    };
+
+    double egox, egoy;
+    toLocal(ego_.position.x, ego_.position.y, egox, egoy);
+
+    // 차로 안으로 들어왔으면 복귀 끝. 걸어둔 목표점을 놓는다.
+    if (std::fabs(egoy) < RETURN_DONE) { ret_active_ = false; return false; }
+
+    const double v_mps = std::hypot(ego_.velocity.x, ego_.velocity.y) / 3.6;
+    const std::vector<double> cum = cumulativeS();
+
+    // 복귀 예산. 미션 회피였으면 나갈 때와 같은 0.5G 를 쓴다.
+    //
+    // 나갈 때 0.5G 를 허용해놓고 돌아올 때만 0.3G 로 묶으면 차선 밖에 있는 시간만
+    // 길어진다. 복귀가 차선 밖에 머무는 시간은 0.62*sqrt(6D/a) 로 **속도와 무관**
+    // 하고 예산에만 달렸다 - 0.3G 에서 1.53초, 0.5G 에서 1.19초다.
+    // 실측(lap_return1.csv)에서 여유 초과가 3.54초였고 벌점 경계가 3.0초다.
+    //
+    // latch 시점에 걸어두고 복귀가 끝날 때까지 바꾸지 않는다. 매 틱 다시 판정하면
+    // 복귀 도중에 예산이 바뀌어 곡선이 튄다.
+    if (!ret_active_) ret_mission_ = last_mission_;
+    const double a_ret = ret_mission_ ? AVOID_ACCEL_LIMIT : RETURN_ACCEL_LIMIT;
+
+    // 목표점을 건다(latch). 한 번 걸면 도로 위에 고정이라 차를 따라오지 않는다.
+    if (!ret_active_) {
+      const double L = std::max(MIN_TRANSITION,
+          v_mps * std::sqrt(6.0 * std::fabs(egoy) / a_ret));
+      const double s_target = egox + L;
+      int j = -1;
+      for (int i = 0; i < n; ++i) if (cum[i] >= s_target) { j = i; break; }
+      if (j < 0) return false;          // 남은 경로가 짧다. 이번 틱은 원본을 낸다
+      ret_x_ = local_path_.poses[j].pose.position.x;
+      ret_y_ = local_path_.poses[j].pose.position.y;
+      ret_active_ = true;
+      ROS_INFO("[lattice] return latched: offset %.2f m, L %.1f m, budget %.2f m/s^2 (%s)",
+               egoy, L, a_ret, ret_mission_ ? "mission" : "normal");
+    }
+
+    // 걸어둔 목표점까지 남은 거리. 차가 갈수록 줄어 곡선이 가팔라진다.
+    double rx, ry;
+    toLocal(ret_x_, ret_y_, rx, ry);
+    const double xf = rx - egox;
+    if (xf < RETURN_MIN_SPAN) {         // 지나쳤거나 너무 가깝다. 놓고 다시 건다
+      ret_active_ = false;
+      return false;
+    }
+
+    // 3차곡선: y(0)=ps, y'(0)=0, y(xf)=pf, y'(xf)=0
+    //
+    // y'(0) 은 아직 0 이다. 차의 실제 헤딩을 넣는 것은 다음 단계로 분리했다.
+    // 끝점 고정만으로 얼마나 좋아지는지를 먼저 재기 위해서다.
+    const double ps = egoy, pf = ry;
+    const double D  = pf - ps;
+    const double a2 =  3.0 * D / (xf * xf);
+    const double a3 = -2.0 * D / (xf * xf * xf);
+
+    // 요구 횡가속도(최대 곡률 6|D|/xf^2). 예산을 넘으면 차가 못 따라가 오버슈트가
+    // 남는다. 조용히 넘어가지 않도록 경고한다 - 회피 쪽 cand_accel_ 과 같은 취지다.
+    const double need = 6.0 * std::fabs(D) / (xf * xf) * v_mps * v_mps;
+    if (need > a_ret)
+      ROS_WARN_THROTTLE(1.0,
+          "[lattice] return needs %.2f m/s^2 (limit %.2f, span %.1fm) - overshoot likely",
+          need, a_ret, xf);
+
+    out = nav_msgs::Path();
+    out.header = local_path_.header;
+    for (double x = 0.0; x < xf; x += X_INTERVAL) {
+      const double y = ps + a2 * x * x + a3 * x * x * x;
+      double wx, wy;
+      toWorld(egox + x, y, wx, wy);
+      geometry_msgs::PoseStamped p;
+      p.header.frame_id = "map";
+      p.pose.position.x = wx;
+      p.pose.position.y = wy;
+      p.pose.orientation.w = 1.0;
+      out.poses.push_back(p);
+    }
+
+    // 목표점 이후는 기준경로를 그대로 붙인다. pure_pursuit 이 전방주시점을
+    // 찾을 만큼은 남아 있어야 한다. 목표점을 world 로 저장해두었으므로 매 틱
+    // 최근접 인덱스를 다시 찾는다 - local_path 창이 앞으로 밀리기 때문이다.
+    int j = 0;
+    double bd = std::numeric_limits<double>::max();
+    for (int i = 0; i < n; ++i) {
+      const double d = std::hypot(local_path_.poses[i].pose.position.x - ret_x_,
+                                  local_path_.poses[i].pose.position.y - ret_y_);
+      if (d < bd) { bd = d; j = i; }
+    }
+    for (int i = j + 1; i < n; ++i) out.poses.push_back(local_path_.poses[i]);
+
+    return out.poses.size() > 1;
+  }
+
   void run(const ros::TimerEvent&)
   {
     if (!(has_path_ && has_ego_ && has_obj_)) return;
@@ -722,14 +873,20 @@ private:
     // 그때까지는 기준경로를 그대로 낸다. 회피 직후 한 틱 점프하고 pure_pursuit 이
     // 과보정해 CTE 가 0.2~0.5m 진동하지만(속도 비례), 차로 여유 0.809m 안이다.
     if (trigger_obs.empty() || !sp.valid) {
-      pub_path_.publish(local_path_);
+      nav_msgs::Path ret;
+      if (buildReturnPath(ret)) pub_path_.publish(ret);
+      else                      pub_path_.publish(local_path_);
       publishAvoidLimit(behavior::kNoLimit);   // 제한 없음. 지나고 나면 여기로 돌아온다
       clearCandidates();
       return;
     }
 
+    // 회피가 다시 걸렸다. 걸어둔 복귀 목표점은 의미가 없어졌으므로 놓는다.
+    ret_active_ = false;
+
     // 정적장애물 미션에서만 예외 처리(감속 + 횡가속 완화). 좌표로 판정한다.
     const bool mission = isMissionObstacle(trigger_obs);
+    last_mission_ = mission;   // 복귀 예산을 정할 때 쓴다
 
     std::vector<nav_msgs::Path> cands = generateCandidates(cum, sp, mission);
     if (cands.empty()) {

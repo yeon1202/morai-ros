@@ -175,6 +175,88 @@ class Harness:
                 return p.pose.position.x - self._origin[0]
         return None
 
+    def _settle(self, origin, ego_y, speed, obs=()):
+        """입력을 1.2초간 쏘고 마지막 /lattice_path 를 돌려준다.
+
+        run_case 와 같은 이유로 마지막 것을 쓴다 - 30Hz 타이머라 첫 메시지는
+        이전 입력으로 계산된 것일 수 있다.
+        """
+        path = straight_path(origin)
+        e = ego(speed, ego_y, origin)
+        o = objects(list(obs))
+        self._obs = list(obs)
+        self._origin = origin
+        self.got = None
+        t0 = time.time()
+        while time.time() - t0 < 1.2:
+            self.pub_path.publish(path)
+            self.pub_ego.publish(e)
+            self.pub_obj.publish(o)
+            time.sleep(0.05)
+        return self.got
+
+    def merge_x(self, poses, origin, thr=0.02):
+        """복귀 곡선이 기준경로에 합류하는 지점의 world x [m].
+
+        기준경로가 y=origin[1] 직선이므로 횡변위가 thr 을 넘는 마지막 점을
+        합류점으로 본다. 곡선이 없으면(기준경로 원본이 발행되면) None 이다.
+        """
+        last = None
+        for p in poses:
+            if abs(p.pose.position.y - origin[1]) > thr:
+                last = p.pose.position.x
+        return last
+
+    def run_pin_case(self, name, ego_y=-2.3, speed=38.0, advance=3.0, tol=1.0):
+        """복귀 곡선의 합류점이 도로 위에 못박혀 있는가.
+
+        같은 횡오차를 유지한 채 차와 지역경로만 advance 만큼 앞으로 옮겨
+        두 틱을 재현한다.
+
+          도로에 고정 -> 합류점 world 좌표가 그대로 (drift ~ 0)
+          차 기준     -> 합류점이 차를 따라 advance 만큼 도망감
+
+        후자가 2026-08-19 에 복귀 곡선을 되돌린 이유다. 끝점이 도망가면
+        pure_pursuit 이 보는 오차가 늘 0 에 가까워 영영 수렴하지 않는다.
+        """
+        a = self._settle((0.0, 0.0), ego_y, speed)
+        ma = self.merge_x(a.poses, (0.0, 0.0)) if (a and a.poses) else None
+        b = self._settle((advance, 0.0), ego_y, speed)
+        mb = self.merge_x(b.poses, (advance, 0.0)) if (b and b.poses) else None
+
+        if ma is None or mb is None:
+            print('  %-30s 복귀 곡선 없음 (기준경로 원본 발행)  ** 미구현 **' % name)
+            return False
+
+        drift = mb - ma
+        ok = abs(drift) <= tol
+        print('  %-30s 합류점 %.1f -> %.1f m  이동 %+.2f m (<=%.1f)  %s'
+              % (name, ma, mb, drift, tol, 'OK' if ok else '** 차를 따라감 **'))
+        return ok
+
+    def run_mission_return_case(self, name, mobs, origin_before, origin_after,
+                                speed=38.0, ego_y=-2.3, lo=14.0, hi=20.0):
+        """미션 회피 직후의 복귀가 나갈 때와 같은 0.5G 예산을 쓰는가.
+
+        먼저 미션 장애물을 놓고 한 번 돌려 lattice 를 "미션 회피 중" 상태로 만든 뒤,
+        장애물을 치우고 차를 옆에 띄운 채 복귀 곡선을 받는다.
+
+        예산만 다르면 전이 길이가 L = v*sqrt(6|d|/a) 로 갈린다. 38km/h, 2.3m 에서
+          0.3G -> 22.9 m,   0.5G -> 17.7 m
+        이 차이를 직접 잰다. 0.3G 로 계산되면 20m 를 넘어 실패한다.
+        """
+        self._settle(origin_before, ego_y, speed, obs=[mobs])   # 미션 회피 상태로
+        got = self._settle(origin_after, ego_y, speed)          # 장애물 없음 -> 복귀
+        m = self.merge_x(got.poses, origin_after) if (got and got.poses) else None
+        if m is None:
+            print('  %-30s 복귀 곡선 없음  ** 실패 **' % name)
+            return False
+        span = m - origin_after[0]
+        ok = lo <= span <= hi
+        print('  %-30s 전이 길이 %.1f m  기대 %.0f~%.0f m  %s'
+              % (name, span, lo, hi, 'OK' if ok else '** 0.3G 로 계산된 듯 **'))
+        return ok
+
     def run_case(self, name, obs, expect, tol=0.25, peds=(), speed=20.0, max_g=None,
                  touch_x_min=None, ego_y=0.0, origin=(0.0, 0.0), expect_avoid_kmh=None):
         """obs 를 놓고 lattice 가 고른 경로의 최대 횡변위를 잰다.
@@ -334,7 +416,35 @@ def main():
     # pure_pursuit 이 보는 오차가 늘 0 에 가까워 되돌아오질 않았다.
     # 다시 시도한다면 끝점을 도로 위 한 지점에 고정해야 한다(lattice_planner.cpp
     # run() 주석 참고). 이 케이스는 그 회귀를 막는다.
-    results.append(h.run_case('회피 직후 -> 기준경로 그대로', [], 0.0, ego_y=-2.3, speed=38.0))
+    # 2026-08-21: 기대값을 0.0 -> -2.3 으로 바꿨다.
+    #
+    # 위 가드는 "복귀 곡선을 내지 마라" 였다. 되돌린 복귀 곡선이 끝점 도망 버그를
+    # 갖고 있었기 때문이다. 이제 끝점을 도로에 못박아 다시 넣었으므로, 이 자리에서
+    # 나와야 하는 것은 기준경로 원본이 아니라 **차의 현재 위치에서 시작하는
+    # 복귀 곡선**이다. 그래서 최대 횡변위가 차의 횡오차(-2.3m)와 같아야 한다.
+    #
+    # 원래 가드가 막으려던 회귀(끝점이 차를 따라가 영영 수렴하지 않음)는 아래
+    # run_pin_case 가 직접 잡는다. 그쪽이 근본 원인을 재는 더 정확한 테스트다.
+    results.append(h.run_case('회피 직후 -> 복귀 곡선 시작', [], -2.3, ego_y=-2.3, speed=38.0))
+
+    # --- 복귀 곡선의 끝점 고정 (진행중) ---
+    #
+    # 2026-08-21 실측(lap_gate3.csv): 회피 직후 pure_pursuit 이 과보정해 반대쪽으로
+    # 1.21m 넘어갔다. 차로 여유 0.809m 를 7.5m / 1.29초 동안 넘겼고, 방향이
+    # 중앙선 쪽이다. 위 주석의 "0.2~0.5m 진동" 가정이 38km/h 복귀에서 깨졌다.
+    #
+    # 처방은 위에 적어둔 그대로다 - 복귀 곡선을 다시 넣되 **끝점을 도로 위에
+    # 못박는다**. 이 케이스가 그 조건을 직접 잰다. 지금은 복귀 곡선 자체가 없어
+    # 실패하는 것이 정상이다.
+    results.append(h.run_pin_case('복귀 곡선 끝점 고정', ego_y=-2.3, speed=38.0))
+
+    # 미션 회피 직후의 복귀는 나갈 때와 같은 0.5G 를 쓴다 (2026-08-21).
+    #
+    # 나갈 때 0.5G 를 허용해놓고 돌아올 때만 0.3G 로 묶으면 차선 밖에 있는 시간만
+    # 길어진다. 복귀가 차선 밖에 머무는 시간은 0.62*sqrt(6D/a) 로 속도와 무관하고
+    # 예산에만 달렸다. 실측(lap_return1.csv) 여유 초과 3.54초, 벌점 경계 3.0초.
+    #
+    # 이 케이스는 MOBS 정의 뒤로 옮겨야 해서 여기가 아니라 아래에 있다.
 
     # --- 정적장애물 미션 전용 예외 (2026-08-19) ---
     #
@@ -359,6 +469,10 @@ def main():
     results.append(h.run_case('미션 장애물 13m -> 24.4km/h 하한', [MOBS], -3.0,
                               speed=25.0, origin=(MX - 13.0, MY),
                               expect_avoid_kmh=24.4))
+
+    results.append(h.run_mission_return_case('미션 복귀 -> 0.5G 예산', MOBS,
+                                             origin_before=(MX - 13.0, MY),
+                                             origin_after=(MX + 10.0, MY)))
 
     print('')
     ok = all(results)
