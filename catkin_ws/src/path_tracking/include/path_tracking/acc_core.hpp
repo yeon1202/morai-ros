@@ -10,7 +10,10 @@ namespace acc {
 struct Vec2 { double x = 0.0; double y = 0.0; };
 
 // 탐색 입력용 객체 (속도는 이미 m/s로 변환된 값)
-struct ObjIn { Vec2 pos; double speed_mps = 0.0; };
+//
+// radius: 물체의 외접원 반경 [m]. lattice_planner 의 gatherObstacles 와 같은
+//   방식(0.5*max(size.x,size.y))으로 채운다. 기본 0 이면 점으로 취급한다.
+struct ObjIn { Vec2 pos; double speed_mps = 0.0; double radius = 0.0; };
 
 // 선택된 앞차/장애물
 struct Lead {
@@ -23,7 +26,9 @@ struct AccParams {
   double time_gap           = 1.0;    // [s]
   double default_space      = 5.0;    // [m] 최소 정지 간격
   double vehicle_length     = 4.635;  // [m] Ioniq5
-  double distance_threshold = 2.5;    // [m] 경로 위 판정 횡거리 |d|
+  double distance_threshold = 2.5;    // [m] (미사용 - car_half_width 로 대체됨. 아래 참고)
+  double car_half_width     = 0.95;   // [m] 주행 통로 반폭. lattice_planner 의
+                                      //     CAR_HALF_WIDTH 와 같은 값이어야 한다.
   double lookahead          = 60.0;   // [m] 전방 탐색 거리 (경로 따라간 종거리 기준)
   double velocity_gain      = 0.5;
   double distance_gain      = 1.0;
@@ -98,7 +103,7 @@ inline double speedKmhToMps(double vx_kmh, double vy_kmh) {
 }
 
 // 기준경로 위의 전방 객체 중 ego에 가장 가까운 것을 lead로 선택.
-//   - 경로 위 판정 : |d| < distance_threshold   (횡방향)
+//   - 경로 위 판정 : |d| - radius < car_half_width   (횡방향, 통로와 겹치는가)
 //   - 전방 판정    : s_obj − s_ego > 0          (부호로 앞뒤 구분)
 //   - 탐색 범위    : s_obj − s_ego <= lookahead (종방향, 경로 따라간 거리)
 //   - distance     : 종방향 gap − vehicle_length
@@ -116,7 +121,21 @@ inline Lead selectLead(const std::vector<Vec2>& path, const Vec2& ego,
   for (const auto& o : objs) {
     Projection op = projectToPath(path, o.pos);
     if (!op.valid) continue;
-    if (op.d >= p.distance_threshold) continue;      // 차선 밖
+    // "내 주행 통로와 실제로 겹치는가" 로 판정한다.
+    //
+    // 예전엔 중심거리만 봤다: |d| < distance_threshold(2.5m).
+    // 2026-09-02 실측에서 이게 물렸다 - 경로에서 횡 2.1~2.3m 인 도로변 가로등이
+    // 전부 "앞차" 로 잡혀, 9.635m 안에 들어가는 순간 목표속도가 0 이 되고 차가
+    // 길 한복판에 섰다. 같은 물체를 lattice 는 통과시켰다(임계 1.75m). 두 모듈이
+    // 같은 물체를 다르게 판정한 것이 문제였다.
+    //
+    // 물체 가장자리까지의 거리(|d| - 반경)를 차 반폭과 비교하면 lattice 와 같은
+    // 질문이 된다. 위 가로등은 2.18 - 0.30 = 1.88 > 0.95 라 앞차가 아니다.
+    //
+    // ⚠️ 호출자가 radius 를 안 채우면 점으로 취급된다. 그러면 차선 안에서 조금
+    //    치우친 진짜 앞차를 놓칠 수 있다. acc_planner 는 반드시 크기를 넘길 것.
+    if (op.d - o.radius >= p.car_half_width) continue;   // 통로 밖
+
 
     double gap = op.s - ego_proj.s;                  // 종방향 gap (부호 있음)
     if (gap <= 0.0) continue;                        // 뒤차

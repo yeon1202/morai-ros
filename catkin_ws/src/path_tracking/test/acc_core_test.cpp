@@ -268,6 +268,49 @@ TEST(SelectLead, ObjectOffPathIgnored) {
   EXPECT_FALSE(lead.present);
 }
 
+// 도로변 기둥은 앞차가 아니다 (2026-09-02 실측 회귀 테스트).
+//
+// 인지를 붙여 돌리니 차가 길 한복판에서 섰다. /Object_topic 을 받아보니 가로등
+// 기둥들이 경로에서 횡 2.10~2.31m 에 있었고, distance_threshold(2.5m) 안이라
+// 전부 "앞차" 로 잡혔다. 9.635m(= vehicle_length + default_space) 안에 들어가는
+// 순간 목표속도가 0 이 되고, 서 있으면 상황이 안 변해 계속 서 있었다.
+//
+// 같은 물체를 lattice 는 통과시켰다(임계 0.30+0.95+0.5 = 1.75m < 2.18m).
+// 두 모듈이 같은 물체를 다르게 판정한 것이 버그의 본질이다.
+//
+// 중심거리가 아니라 "실제로 닿는가" 로 판정해야 한다:
+//   물체 가장자리까지 2.18 - 0.30 = 1.88m,  차 반폭 0.95m  ->  0.93m 여유.
+TEST(SelectLead, RoadsidePoleOutsideCorridorIgnored) {
+  AccParams p = defaultParams();
+  std::vector<Vec2> path = straightPath();
+  Vec2 ego{0.0, 0.0};
+  ObjIn pole;
+  pole.pos = {20.0, 2.18};
+  pole.speed_mps = 0.0;
+  pole.radius = 0.30;
+  Lead lead = selectLead(path, ego, {pole}, p);
+  EXPECT_FALSE(lead.present);
+}
+
+// 크지만 중심이 멀리 있는 물체는 잡아야 한다 (예전 규칙의 안전 구멍).
+//
+// 예전 규칙(|d| < 2.5)은 "중심이 멀면 무시" 라서, 폭이 큰 물체가 중심은 2.5m 밖에
+// 있으면서 통로 안으로 뻗어 들어와도 놓쳤다. 아래는 반경 2.0m 물체가 횡 2.8m 에
+// 있는 경우로, 가장자리가 0.8m 까지 들어와 차 반폭(0.95m) 안이다. 실제로 닿는다.
+//   예전 규칙: 2.8 >= 2.5  -> 무시 (위험)
+//   지금 규칙: 2.8 - 2.0 = 0.8 < 0.95 -> 앞차로 잡음
+TEST(SelectLead, WideObjectReachingIntoCorridorSelected) {
+  AccParams p = defaultParams();
+  std::vector<Vec2> path = straightPath();
+  Vec2 ego{0.0, 0.0};
+  ObjIn wide;
+  wide.pos = {20.0, 2.8};
+  wide.speed_mps = 0.0;
+  wide.radius = 2.0;
+  Lead lead = selectLead(path, ego, {wide}, p);
+  EXPECT_TRUE(lead.present);
+}
+
 // 두 객체 → 더 가까운 것 선택
 TEST(SelectLead, NearestChosen) {
   AccParams p = defaultParams();
