@@ -16,6 +16,10 @@ find_package(catkin REQUIRED COMPONENTS
   visualization_msgs
   nav_msgs
   std_msgs
+  # object_topic_adapter.py 가 쓰는 RecognizedObjectArray.
+  # 파이썬 노드라 컴파일 의존은 없지만, 명시하면 catkin 이 autonomous_driving 의
+  # 메시지를 먼저 생성하도록 빌드 순서를 보장한다.
+  autonomous_driving
 )
 
 ## System dependencies are found with CMake's conventions

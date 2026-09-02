@@ -11,8 +11,30 @@
   <!-- 경로 추종 (path_smooth.csv -> /ctrl_cmd) -->
   <node pkg="path_tracking" type="path_tracker.py" name="path_tracker" output="screen"/>
 
-  <!-- 가짜 장애물 (perception 준비되면 이 줄만 지우면 됨) -->
-  <node pkg="path_tracking" type="mock_obstacle_pub" name="mock_obstacle_pub" output="screen"/>
+  <!-- 장애물 공급원 전환 (2026-08-27 추가. docs/24-perception_integration_design.md)
+
+       perception:=false  (기본)
+         mock_obstacle_pub 이 시나리오 좌표를 20Hz 로 발행한다.
+         오프라인 검증(test_lattice.py 16/16)과 회귀 비교의 기준이라 기본값으로
+         남겨둔다. 인지가 충분히 검증되기 전에 이 경로를 잃으면 안 된다.
+
+       perception:=true
+         팀 인지 스택 + 어댑터가 실제 검출을 발행한다.
+         ※ 전제: udp_bridge 와 localization.launch 가 먼저 떠 있어야 한다.
+           인지의 global_transform_node 가 tf(lidar->base_link->odom)를 쓰는데
+           base_link->lidar 는 localization.launch 가, odom->base_link 는
+           ekf_localization_node 가 낸다. 둘 다 없으면 인지가 조용히 멈춘다. -->
+  <arg name="perception" default="false"/>
+  <arg name="camera"     default="true"/>   <!-- perception:=true 일 때만 의미 있음 -->
+
+  <node unless="$(arg perception)" pkg="path_tracking" type="mock_obstacle_pub"
+        name="mock_obstacle_pub" output="screen"/>
+
+  <include if="$(arg perception)" file="$(find autonomous_driving)/launch/perception.launch">
+    <arg name="camera" value="$(arg camera)"/>
+  </include>
+  <node if="$(arg perception)" pkg="path_tracking" type="object_topic_adapter.py"
+        name="object_topic_adapter" output="screen"/>
 
   <!-- 장애물 시각화 (실제 perception 와도 계속 사용) -->
   <node pkg="path_tracking" type="object_viz" name="object_viz" output="screen"/>

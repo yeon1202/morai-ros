@@ -50,6 +50,11 @@
   <!--   <doc_depend>doxygen</doc_depend> -->
   <buildtool_depend>catkin</buildtool_depend>
   <build_depend>morai_msgs</build_depend>
+  <!-- perception 결과(RecognizedObjectArray)를 /Object_topic 으로 변환하는
+       object_topic_adapter.py 가 쓴다. planning -> perception 단방향이라
+       순환 의존은 없다 (autonomous_driving 은 path_tracking 을 참조하지 않는다). -->
+  <build_depend>autonomous_driving</build_depend>
+  <exec_depend>autonomous_driving</exec_depend>
   <build_depend>rospy</build_depend>
   <build_export_depend>morai_msgs</build_export_depend>
   <build_export_depend>rospy</build_export_depend>

@@ -39,8 +39,14 @@ int main(int argc, char** argv)
     obs.position.x = -60.610;     // 시나리오 objectList[0].pos (ENU, 맵 좌표)
     obs.position.y = -142.178;
     obs.position.z = 28.374;
-    obs.size.x = 2.0;             // width  [m]
-    obs.size.y = 3.0;             // length [m]
+    // size 규약: x=length(주축), y=width(부축), z=height.
+    // 2026-08-27 에 팀 perception 의 RecognizedObject 규약으로 통일했다
+    // (예전에는 x=width, y=length 로 반대였다). 시나리오 scale (2, 3, 2) 에서
+    // 길이가 3, 폭이 2 다.
+    // ※ lattice 는 0.5*max(x,y) 외접원이라 이 교체로 충돌 판정은 안 바뀐다.
+    //   바뀌는 것은 object_viz 가 그리는 모양뿐이고, 이제 실제 인지와 같게 보인다.
+    obs.size.x = 3.0;             // length [m]
+    obs.size.y = 2.0;             // width  [m]
     obs.size.z = 2.0;             // height [m]
     // 충돌 검사는 0.5*max(size.x, size.y) 로 외접원을 쓰므로 heading 과 무관하게
     // 보수적으로 판정된다. 그래도 시각화/디버깅을 위해 실제 값을 넣어둔다.
