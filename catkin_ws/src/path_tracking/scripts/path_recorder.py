@@ -19,9 +19,10 @@ from morai_msgs.msg import EgoVehicleStatus
 
 class PathRecorder:
     def __init__(self):
-        # 저장 위치: path_tracking/path/path.csv
-        #   __file__ = .../path_tracking/scripts/path_recorder.py
-        #   dirname 두 번 올라가면 .../path_tracking
+        # 저장 위치: <패키지>/path/path.csv
+        #   __file__ = .../scripts/path_recorder.py 이므로
+        #   dirname 을 두 번 올라가면 패키지 루트가 된다.
+        #   (팀 repo 로 옮겨도 그대로 맞도록 폴더 이름을 안 박아둔다)
         pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         # 저장 파일명을 파라미터로 받는다 (기본값은 기존과 동일)
         #   예) rosrun path_tracking path_recorder.py _file:=approach.csv

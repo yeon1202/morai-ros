@@ -23,7 +23,7 @@ diag_frame.py 와 같은 원칙
   rosrun path_tracking diag_odom.py
   rosrun path_tracking diag_odom.py _tag:=lap2
 
-  _out_dir : CSV 저장 폴더 (기본 /home/dev/catkin_ws/logs)
+  _out_dir : CSV 저장 폴더 (기본은 lib/logdir.py 가 환경 보고 고른다)
   _tag     : 파일명 꼬리표. odom_<tag>.csv / odomego_<tag>.csv
 
 Ctrl+C 로 끝내면 몇 줄씩 쌓였는지 요약한다.
@@ -31,6 +31,8 @@ Ctrl+C 로 끝내면 몇 줄씩 쌓였는지 요약한다.
 import csv
 import math
 import os
+
+from lib.logdir import default_log_dir
 
 import rospy
 from nav_msgs.msg import Odometry
@@ -46,7 +48,7 @@ def yaw_deg(q):
 
 class DiagOdom:
     def __init__(self):
-        out_dir = rospy.get_param('~out_dir', '/home/dev/catkin_ws/logs')
+        out_dir = rospy.get_param('~out_dir', default_log_dir())
         tag     = rospy.get_param('~tag', 'frame')
         self.f_odom = open(os.path.join(out_dir, 'odom_%s.csv' % tag), 'w')
         self.f_ego  = open(os.path.join(out_dir, 'odomego_%s.csv' % tag), 'w')

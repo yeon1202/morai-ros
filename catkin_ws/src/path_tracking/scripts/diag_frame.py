@@ -29,8 +29,9 @@ diag_frame : GPS 좌표계와 MORAI 맵 좌표계가 같은 프레임인지 재�
   rosrun path_tracking diag_frame.py
   rosrun path_tracking diag_frame.py _out_dir:=/tmp _tag:=lap2
 
-  _out_dir : CSV 저장 폴더 (기본 /home/dev/catkin_ws/logs — 바인드 마운트라
-             호스트 ~/morai-ros/catkin_ws/logs 에서 바로 열린다)
+  _out_dir : CSV 저장 폴더. 기본값은 lib/logdir.py 가 환경을 보고 고른다 -
+             도커면 마운트된 catkin_ws/logs(호스트에서 바로 열린다),
+             아니면 ~/morai_logs
   _tag     : 파일명 꼬리표. frame_gps_<tag>.csv / frame_ego_<tag>.csv
 
 Ctrl+C 로 끝내면 몇 줄씩 쌓였는지 요약한다.
@@ -38,13 +39,15 @@ Ctrl+C 로 끝내면 몇 줄씩 쌓였는지 요약한다.
 import csv
 import os
 
+from lib.logdir import default_log_dir
+
 import rospy
 from morai_msgs.msg import EgoVehicleStatus, GPSMessage
 
 
 class FrameLogger(object):
     def __init__(self):
-        out_dir = rospy.get_param('~out_dir', '/home/dev/catkin_ws/logs')
+        out_dir = rospy.get_param('~out_dir', default_log_dir())
         tag = str(rospy.get_param('~tag', 'frame'))
 
         if not os.path.isdir(out_dir):
