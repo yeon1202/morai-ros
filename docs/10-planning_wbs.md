@@ -49,7 +49,7 @@
 | 4.2 | ROS 노드 `acc_planner.cpp` (`/target_velocity` 발행) | ✅ | Task3, 스모크테스트 통과 |
 | 4.3 | `mock_lead_vehicle.cpp` (움직이는 앞차 검증노드) | ✅ | Task4. `acc.launch` 에 배선 완료 |
 | 4.4 | `path_tracker` 임시 통합 (`/target_velocity` 구독) | ✅ | Task5. 0.5s 끊김 시 자체속도 폴백까지 (`path_tracker.py:129`) |
-| 4.5 | `/target_velocity` 인터페이스 문서 (control 인계) | ⬜ | Task6 |
+| 4.5 | `/target_velocity` 인터페이스 문서 (control 인계) | 🔄 | 09-02 초안 `22-planning_control_interface.md`. 범위 확대(`/lattice_path`·`/ctrl_cmd` 포함). control 답변 대기 |
 | 4.6 | 실차 확인 + gain 튜닝 (velocity_gain/distance_gain) | ⬜ | 시뮬에서 |
 | — | 문서: `40-acc_design.md`, `41-acc_plan.md` | ✅ | |
 

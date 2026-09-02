@@ -28,8 +28,11 @@
 |---|---|
 | [20-perception_interface.md](20-perception_interface.md) | perception → planning. `/Object_topic`, `morai_msgs/ObjectStatusList` |
 | [21-localization_interface.md](21-localization_interface.md) | localization → planning. `/odom`, `nav_msgs/Odometry` |
-| 22-target_velocity_interface.md | planning → control. `/target_velocity`. **미작성** (41-acc_plan.md Task6) |
+| [22-planning_control_interface.md](22-planning_control_interface.md) | **planning → control 명세.** `/lattice_path`·`/target_velocity`·`/ctrl_cmd` 소유권. 초안, 합의 대기 |
 | [23-localization_node_review.md](23-localization_node_review.md) | localization 팀 `localization_node.cpp` 리뷰. `/odom` 명세 대조와 좌표 프레임 정합 리스크 |
+| [24-perception_integration_design.md](24-perception_integration_design.md) | perception 연동 설계. mock 장애물을 실제 인지로 교체하는 구조와 근거 |
+| [25-perception_integration_plan.md](25-perception_integration_plan.md) | 위 설계의 구현 계획. Task 6개, 단계별 검증 명령 포함 |
+| [26-lane_interface.md](26-lane_interface.md) | **perception(차선) → planning 명세.** 차량좌표 3차 다항식·촬영시각·실선/점선. 초안, 협의 대기 |
 
 ## 3x — 횡방향 (lattice)
 
