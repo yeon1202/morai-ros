@@ -10,6 +10,7 @@
 //       계산은 순수 로직 acc_core.hpp가 담당, 이 노드는 구독/발행 배관만.
 #include <ros/ros.h>
 #include <nav_msgs/Path.h>
+#include <nav_msgs/Odometry.h>
 #include <std_msgs/Float64.h>
 #include <morai_msgs/EgoVehicleStatus.h>
 #include <morai_msgs/ObjectStatusList.h>
@@ -64,6 +65,7 @@ public:
     sub_local_   = nh.subscribe("/local_path",   1, &AccPlanner::localCb,   this);
     sub_lattice_ = nh.subscribe("/lattice_path", 1, &AccPlanner::latticeCb, this);
     sub_ego_     = nh.subscribe("/ego_status",   1, &AccPlanner::egoCb,     this);
+    sub_odom_ = nh.subscribe("/odom", 1, &AccPlanner::odomCb, this);
     sub_obj_     = nh.subscribe("/Object_topic", 1, &AccPlanner::objCb,     this);
     // 발행 토픽. behavior_fsm 이 종방향 단일 권한을 가지므로 기본값은 제약 토픽이다.
     //
@@ -91,10 +93,20 @@ private:
   morai_msgs::ObjectStatusList objs_;
   ros::Time lattice_stamp_;
   bool has_local_ = false, has_ego_ = false, has_obj_ = false;
+  nav_msgs::Odometry odom_;
+  bool has_odom_ = false;
+  ros::Subscriber sub_odom_;
 
 
   void localCb(const nav_msgs::Path::ConstPtr& m)   { local_path_ = *m; has_local_ = true; }
+  // 속도만 쓴다. 위치는 odomCb 에서 받는다 - 대회 규정 채널(9109)은 position 을
+  // 0,0,0 으로 주기 때문이다 (2026-08-29 전환).
   void egoCb(const morai_msgs::EgoVehicleStatus::ConstPtr& m) { ego_ = *m; has_ego_ = true; }
+
+  // 위치는 /odom(GPS+IMU 융합)에서 받는다.
+  // ※ twist 는 쓰지 않는다. wheel_speed_scaler 가 시뮬 배속을 곱해 벽시계 단위로
+  //   바꿔놓은 값이라 실제 주행속도가 아니다. 속도는 계속 /ego_status 에서 받는다.
+  void odomCb(const nav_msgs::Odometry::ConstPtr& m) { odom_ = *m; has_odom_ = true; }
   void objCb(const morai_msgs::ObjectStatusList::ConstPtr& m) { objs_ = *m; has_obj_ = true; }
   void latticeCb(const nav_msgs::Path::ConstPtr& m) { lattice_path_ = *m; lattice_stamp_ = ros::Time::now(); }
 
@@ -134,12 +146,12 @@ private:
     // 안 떠 있으면 ACC 가 아무것도 발행하지 않았다 - 대회에서 perception 이 늦게
     // 뜨면 그동안 종방향 제어가 통째로 비는 셈이다. 객체가 없으면 크루즈 + 곡률
     // 제한만으로 목표속도를 낸다.
-    if (!(has_local_ && has_ego_)) return;
+    if (!(has_local_ && has_ego_ && has_odom_)) return;
 
     std::vector<acc::Vec2> path = followPath();
     if (path.empty()) return;
 
-    acc::Vec2 ego{ego_.position.x, ego_.position.y};
+    acc::Vec2 ego{odom_.pose.pose.position.x, odom_.pose.pose.position.y};
     // /ego_status 의 velocity 는 UDP 원본 그대로라 단위가 km/h 다(브릿지가 변환 안 함).
     // 객체와 똑같이 m/s 로 바꿔야 한다. 안 그러면 실제보다 3.6배 빠른 줄 알고 계산한다.
     double ego_vel = acc::speedKmhToMps(ego_.velocity.x, ego_.velocity.y);  // m/s

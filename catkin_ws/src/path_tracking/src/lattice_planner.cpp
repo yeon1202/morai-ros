@@ -10,6 +10,7 @@
 //       없으면 기준경로 그대로 통과.
 #include <ros/ros.h>
 #include <nav_msgs/Path.h>
+#include <nav_msgs/Odometry.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <std_msgs/Float64.h>
 #include <morai_msgs/EgoVehicleStatus.h>
@@ -44,6 +45,7 @@ public:
     ros::NodeHandle nh;
     sub_path_ = nh.subscribe("/local_path", 1, &LatticePlanner::pathCb, this);
     sub_ego_  = nh.subscribe("/ego_status", 1, &LatticePlanner::egoCb, this);
+    sub_odom_ = nh.subscribe("/odom", 1, &LatticePlanner::odomCb, this);
     sub_obj_  = nh.subscribe("/Object_topic", 1, &LatticePlanner::objCb, this);
     pub_path_ = nh.advertise<nav_msgs::Path>("/lattice_path", 1);
     pub_cand_ = nh.advertise<visualization_msgs::MarkerArray>("/lattice_candidates", 1);
@@ -211,6 +213,9 @@ private:
   morai_msgs::EgoVehicleStatus ego_;
   morai_msgs::ObjectStatusList objs_;
   bool has_path_ = false, has_ego_ = false, has_obj_ = false;
+  nav_msgs::Odometry odom_;
+  bool has_odom_ = false;
+  ros::Subscriber sub_odom_;
   bool cand_shown_ = false;   // RViz 에 후보 마커가 떠 있는 상태인가
   // 후보별 요구 횡가속도 [m/s^2]. generateCandidates 가 채우고 run 이 고른 것만 본다.
   std::vector<double> cand_accel_;
@@ -225,7 +230,14 @@ private:
   bool   ret_mission_  = false;   // latch 시점에 걸어두고 복귀가 끝날 때까지 유지
 
   void pathCb(const nav_msgs::Path::ConstPtr& m) { local_path_ = *m; has_path_ = true; }
+  // 속도만 쓴다. 위치는 odomCb 에서 받는다 - 대회 규정 채널(9109)은 position 을
+  // 0,0,0 으로 주기 때문이다 (2026-08-29 전환).
   void egoCb(const morai_msgs::EgoVehicleStatus::ConstPtr& m) { ego_ = *m; has_ego_ = true; }
+
+  // 위치는 /odom(GPS+IMU 융합)에서 받는다.
+  // ※ twist 는 쓰지 않는다. wheel_speed_scaler 가 시뮬 배속을 곱해 벽시계 단위로
+  //   바꿔놓은 값이라 실제 주행속도가 아니다. 속도는 계속 /ego_status 에서 받는다.
+  void odomCb(const nav_msgs::Odometry::ConstPtr& m) { odom_ = *m; has_odom_ = true; }
   void objCb(const morai_msgs::ObjectStatusList::ConstPtr& m) { objs_ = *m; has_obj_ = true; }
 
   // 장애물 하나 = 위치 + 반경(size 반영)
@@ -530,7 +542,7 @@ private:
       double ps = 0.0;
       if (i_start == 0) {
         double egox, egoy;
-        toLocal(ego_.position.x, ego_.position.y, egox, egoy);
+        toLocal(odom_.pose.pose.position.x, odom_.pose.pose.position.y, egox, egoy);
         ps = egoy;
       }
       double pf = ey + off;      // 끝 횡위치 (offset)
@@ -751,7 +763,7 @@ private:
     };
 
     double egox, egoy;
-    toLocal(ego_.position.x, ego_.position.y, egox, egoy);
+    toLocal(odom_.pose.pose.position.x, odom_.pose.pose.position.y, egox, egoy);
 
     // 차로 안으로 들어왔으면 복귀 끝. 걸어둔 목표점을 놓는다.
     if (std::fabs(egoy) < RETURN_DONE) { ret_active_ = false; return false; }
@@ -843,7 +855,7 @@ private:
 
   void run(const ros::TimerEvent&)
   {
-    if (!(has_path_ && has_ego_ && has_obj_)) return;
+    if (!(has_path_ && has_ego_ && has_obj_ && has_odom_)) return;
 
     // 회피를 촉발할 대상: NPC + 정적장애물 (보행자 제외 - 보행자는 정지 대상)
     std::vector<Obs> trigger_obs = gatherObstacles(false);

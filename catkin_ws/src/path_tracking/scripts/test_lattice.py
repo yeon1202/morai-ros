@@ -3,7 +3,7 @@
 """
 test_lattice : lattice_planner 회피 선택을 시뮬 없이 검증한다.
 
-가짜 /local_path(직선), /ego_status, /Object_topic 을 쏘고 /lattice_path 를 받아
+가짜 /local_path(직선), /ego_status, /odom, /Object_topic 을 쏘고 /lattice_path 를 받아
 "기준경로에서 횡으로 얼마나 벗어난 경로를 골랐는가" 를 잰다. 시뮬레이터도
 주행도 필요 없다. roscore 만 있으면 된다.
 
@@ -17,6 +17,7 @@ from math import hypot
 
 import rospy
 from nav_msgs.msg import Path
+from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Float64
 from morai_msgs.msg import EgoVehicleStatus, ObjectStatusList, ObjectStatus
@@ -46,13 +47,33 @@ def straight_path(origin=(0.0, 0.0)):
 
 
 def ego(speed_kmh=20.0, y=0.0, origin=(0.0, 0.0)):
-    """y 는 기준경로에서의 횡오차. 좌측이 +, 우측이 - 다."""
+    """y 는 기준경로에서의 횡오차. 좌측이 +, 우측이 - 다.
+
+    ※ lattice_planner 는 2026-08-29 부터 위치를 /odom 에서 받는다. 이 함수는
+      속도만 담당하고, 위치는 odom() 이 낸다. position 을 여기 남겨둔 건 다른
+      소비자(behavior_fsm 등)와 형태를 맞추기 위해서다.
+    """
     e = EgoVehicleStatus()
     e.position.x = origin[0]
     e.position.y = origin[1] + y
     e.heading = 0.0
     e.velocity.x = speed_kmh        # 브릿지가 km/h 원본을 그대로 넘긴다
     return e
+
+
+def odom(y=0.0, origin=(0.0, 0.0)):
+    """lattice_planner 가 위치를 여기서 받는다 (2026-08-29 전환).
+
+    ego() 와 같은 자리를 가리켜야 한다 - 둘이 어긋나면 테스트가 재현하는 상황이
+    실제와 달라진다. heading 0 이므로 쿼터니언은 항등이다.
+    """
+    o = Odometry()
+    o.header.frame_id = 'odom'
+    o.child_frame_id = 'base_link'
+    o.pose.pose.position.x = origin[0]
+    o.pose.pose.position.y = origin[1] + y
+    o.pose.pose.orientation.w = 1.0
+    return o
 
 
 def objects(items, pedestrians=()):
@@ -84,6 +105,7 @@ class Harness:
         self._origin = (0.0, 0.0)
         self.pub_path = rospy.Publisher('/local_path', Path, queue_size=1)
         self.pub_ego  = rospy.Publisher('/ego_status', EgoVehicleStatus, queue_size=1)
+        self.pub_odom = rospy.Publisher('/odom', Odometry, queue_size=1)
         self.pub_obj  = rospy.Publisher('/Object_topic', ObjectStatusList, queue_size=1)
         self.cands = None
         self._obs = []
@@ -183,6 +205,7 @@ class Harness:
         """
         path = straight_path(origin)
         e = ego(speed, ego_y, origin)
+        od = odom(ego_y, origin)
         o = objects(list(obs))
         self._obs = list(obs)
         self._origin = origin
@@ -191,6 +214,7 @@ class Harness:
         while time.time() - t0 < 1.2:
             self.pub_path.publish(path)
             self.pub_ego.publish(e)
+            self.pub_odom.publish(od)
             self.pub_obj.publish(o)
             time.sleep(0.05)
         return self.got
@@ -266,6 +290,7 @@ class Harness:
         """
         path = straight_path(origin)
         e = ego(speed, ego_y, origin)
+        od = odom(ego_y, origin)
         o = objects(obs, peds)
         self._obs = list(obs)
         self._origin = origin
@@ -279,6 +304,7 @@ class Harness:
         while time.time() - t0 < 1.2:
             self.pub_path.publish(path)
             self.pub_ego.publish(e)
+            self.pub_odom.publish(od)
             self.pub_obj.publish(o)
             time.sleep(0.05)
 

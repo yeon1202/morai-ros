@@ -16,11 +16,11 @@ import os
 import csv
 import time
 import signal
-from math import hypot, radians
+from math import hypot, atan2
 
 import rospy
 from morai_msgs.msg import EgoVehicleStatus, CtrlCmd
-from nav_msgs.msg import Path
+from nav_msgs.msg import Path, Odometry
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Float64
 
@@ -118,6 +118,14 @@ class PathTracker:
         self.pure_pursuit = PurePursuit(LFD_GAIN, WHEELBASE, MIN_LFD, MAX_LFD)
 
         # 3) ROS 입출력
+        # 위치·헤딩은 /odom(GPS+IMU 융합), 속도는 /ego_status(속도계).
+        # 왜 나눴는지는 odom_callback 주석 참고.
+        self.odom_xy = None              # (x, y) [m]
+        self.odom_yaw = None             # [rad]
+        self.odom_stamp = None
+        self.odom_timeout = rospy.get_param('~odom_timeout', 0.5)   # 초
+        self._odom_warned = None
+
         self.lattice_points = None       # lattice가 준 회피경로 (list of Point)
         self.lattice_stamp = None
         self.acc_velocity = None         # ACC가 준 목표속도 [m/s]
@@ -127,6 +135,7 @@ class PathTracker:
         self.lpath_pub = rospy.Publisher('/local_path', Path, queue_size=1)
         rospy.Subscriber('/lattice_path', Path, self.lattice_callback)
         rospy.Subscriber('/target_velocity', Float64, self.acc_callback)
+        rospy.Subscriber('/odom', Odometry, self.odom_callback)
         rospy.Subscriber('/ego_status', EgoVehicleStatus, self.callback)
 
         self.gpath_pub.publish(self._to_path_msg(self.path))   # 전체 경로 1회 발행
@@ -169,14 +178,55 @@ class PathTracker:
                 points.append(Point(float(row[0]), float(row[1])))
         return points
 
+    def odom_callback(self, msg):
+        """위치와 헤딩을 /odom 에서 받는다 (2026-08-29 전환).
+
+        왜 /ego_status 를 안 쓰나
+          대회 규정 채널(9109 Competition Vehicle Status)은 position 을 0,0,0 으로
+          준다. 개발 중에는 9111(Ego Vehicle Status = ground truth)로 받아 썼지만
+          제출본에 그걸 쓰면 실격이다. 그래서 위치는 GPS+IMU 융합 결과인 /odom
+          에서 받는다.
+
+        왜 속도는 여기서 안 받나
+          /odom.twist 는 wheel_speed_scaler 가 시뮬 배속(r)을 곱해 벽시계 단위로
+          바꿔놓은 값이라 실제 주행속도가 아니다(r=0.5 면 절반으로 보인다).
+          속도계는 대회 채널에서도 그대로 오므로 /ego_status 에서 계속 받는다.
+        """
+        q = msg.pose.pose.orientation
+        self.odom_xy = (msg.pose.pose.position.x, msg.pose.pose.position.y)
+        self.odom_yaw = atan2(2.0 * (q.w * q.z + q.x * q.y),
+                              1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        self.odom_stamp = rospy.Time.now()
+
+    def _odom_fresh(self):
+        """/odom 이 살아 있는지. 죽었으면 조향을 멈춘다.
+
+        /ego_status 는 20Hz 넘게 오는데 /odom 은 8~10Hz 다. 그리고 EKF 가 멈추면
+        (노드 죽음, GPS 음영 장기화) 위치가 그대로 얼어붙는데, 그걸 모르고 계속
+        조향하면 옛 위치 기준으로 핸들을 꺾는다.
+        """
+        if self.odom_stamp is None:
+            return False
+        age = (rospy.Time.now() - self.odom_stamp).to_sec()
+        if age > self.odom_timeout:
+            if self._odom_warned is None or (rospy.Time.now() - self._odom_warned).to_sec() > 2.0:
+                rospy.logwarn('[path_tracker] /odom 이 %.2f초째 없다. 조향을 멈춘다.', age)
+                self._odom_warned = rospy.Time.now()
+            return False
+        return True
+
     def callback(self, msg):
         # 현재 차량 상태
-        #   /ego_status 의 velocity 는 MORAI UDP 원본 그대로라 단위가 km/h 다
-        #   (브릿지가 변환하지 않음). m/s 로 바꿔서 쓸 것 - 안 그러면 목표속도
-        #   비교가 "km/h vs m/s" 가 되어 차가 20km/h 가 아니라 20/3.6 = 5.6km/h 로 기어간다.
+        #   위치·헤딩 : /odom (GPS+IMU 융합)
+        #   속도      : /ego_status 의 velocity. MORAI UDP 원본 그대로라 단위가
+        #               km/h 다(브릿지가 변환하지 않음). m/s 로 바꿔서 쓸 것 -
+        #               안 그러면 목표속도 비교가 "km/h vs m/s" 가 되어 차가
+        #               20km/h 가 아니라 20/3.6 = 5.6km/h 로 기어간다.
+        if not self._odom_fresh():
+            return
         speed = hypot(msg.velocity.x, msg.velocity.y) / 3.6    # km/h -> m/s
-        vs = VehicleState(msg.position.x, msg.position.y,
-                          radians(msg.heading), speed)
+        vs = VehicleState(self.odom_xy[0], self.odom_xy[1],
+                          self.odom_yaw, speed)
 
         # 앞 구간 + (ACC 가 없을 때 쓸) 자체 목표속도
         local_path, fallback_velocity = self.path_manager.get_local_path(vs)
