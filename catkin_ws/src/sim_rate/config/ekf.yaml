@@ -1,0 +1,200 @@
+# ekf_localization_node 설정
+# IMU(방향/각속도/가속도) + /odometry/gps(navsat_transform_node가 UTM 기준으로
+# 정확히 변환한 GPS 위치)를 칼만필터로 융합.
+#
+# 우리는 지상 2D 주행이라 z/roll/pitch는 다 무시(two_d_mode). 바퀴 오도메트리는
+# 없어서 odom0(GPS 유래)와 imu0 두 개만 씀.
+#
+# !!! world_frame 관련 최종 결론 (2026-08-06, robot_localization 소스코드 직접
+# 확인으로 확정) !!! 처음엔 "REP105 이중 EKF는 과하다"고 world_frame=map으로
+# 단일 EKF를 썼는데, 이게 실제로는 map->odom tf를 계산 못 해서 tf를 아예 하나도
+# 못 내보내는 근본 원인이었음(아래 world_frame 항목에 상세 설명). world_frame을
+# odom_frame이랑 맞추는 것으로 해결 - 위치 계산값 자체는 전혀 안 바뀜.
+
+frequency: 40           # !!! CONFIRM 2026-08-08 실측 기반 조정 !!! 30->40.
+                        # 실측 결과 IMU가 실제로 42Hz까지 나오는 걸 확인함
+                        # (rostopic hz /imu). frequency가 이보다 낮으면 EKF가
+                        # IMU를 다 못 쓰고 일부 버림 - 실측치보다 살짝 낮게
+                        # 잡아서(여유분) 최대한 활용하되 시뮬 프레임 변동에도
+                        # 안정적으로 돌게 함.
+sensor_timeout: 0.2
+two_d_mode: true
+
+# ---- 늦게 도착하는 관측 처리 (2026-08-27 추가) ----
+# udp_bridge 가 /gps 스탬프를 전송 지연(실측 0.30초)만큼 과거로 찍는다. 이게
+# 없으면 EKF 는 그 관측을 "내 상태보다 오래됐다"며 버린다
+# ("...but history interval is 0, so ignoring") - GPS 를 통째로 잃는다.
+#
+# 켜면 EKF 가 최근 history_length 초치 상태를 들고 있다가, 늦은 관측이 오면
+#   1) 그 시각의 상태로 되감고  2) 거기서 보정하고  3) 지금까지 다시 굴린다.
+# 닻이 옳은 시각에 박히므로 추측항법이 지연을 온전히 메운다. 지금은 닻이 틀린
+# 자리에 박혀 있어서 추측항법이 그것과 싸우느라 절반만 회복한다(실측 +1.22m).
+#
+# history_length 는 반드시 gps_lag_sec(0.30)보다 커야 한다.
+smooth_lagged_data: true
+history_length: 0.5
+publish_tf: true           # navsat_transform_node가 GPS 안테나 오프셋 제거 함수
+                           # (getRobotOriginWorldPose) 내부에서 world_frame->base_link
+                           # tf를 찾아야 하는데, 이걸 발행해주는 게 바로 이 옵션임.
+publish_acceleration: false
+
+map_frame: map
+odom_frame: odom
+base_link_frame: base_link
+world_frame: odom
+# !!! CONFIRM 진짜 원인 찾음 (robot_localization 소스코드 ros_filter.cpp 직접 확인) !!!
+# world_frame이 map_frame이랑 같으면, EKF가 map->odom을 계산하기 위해 "이미 존재하는
+# odom->base_link tf"를 먼저 찾아서 역산해야 함(REP105 이중 EKF 구조의 로컬 EKF가
+# 이걸 제공하는 게 표준). 근데 우리는 바퀴 오도메트리도 없고 그 tf를 발행하는 다른
+# 노드도 없어서, EKF가 이 계산에 필요한 재료가 없어 tf를 아예 못 내보내고 있었음
+# (/odom 메시지 자체는 이 tf 계산이랑 별개 경로라 정상 발행됐던 것 - 그래서 "/odom은
+# 정상인데 /tf는 0개"라는 헷갈리는 증상이 났음). world_frame을 odom_frame이랑 같게
+# 맞추면, 소스코드 주석대로 "역산 없이 바로 tf 전송"하는 단순 경로를 타서 해결됨.
+# map/odom은 우리한텐 어차피 같은 원점 개념이라 이 변경으로 실제 위치 계산값은
+# 전혀 안 바뀜 - tf에 붙는 이름표만 "map"에서 "odom"으로 바뀌는 것뿐.
+
+# ---- IMU (imu_covariance_patch가 covariance 채워준 버전 - 원본 /imu는 0으로 옴) ----
+imu0: /imu/ekf
+# !!! 2026-08-29 변경: 가속도 융합을 껐다 (true,true -> false,false) !!!
+# IMU 가속도는 "시뮬 1초당 m/s^2" 인데 EKF 는 벽시계 dt 로 적분한다. 속도계
+# 경로는 wheel_speed_scaler 가 r̂ 로 맞춰줬지만 이 경로는 그대로 남아 있었다.
+#   ax -> 종방향, ay -> 횡방향에 각각 직접 들어간다.
+# 실측(lat 런): Step 2 로 종방향 과전진이 +4.03 -> -0.58 m 로 줄었는데 EKF 가
+# 미는 몫이 아직 +1.62 m 남았고, 횡 RMS 는 0.71 -> 0.88 m 로 전혀 안 줄었다.
+# 남은 경로가 여기다.
+#
+# 스케일(r̂^2 곱하기)이 아니라 끄기를 먼저 해보는 이유: 속도는 이미 속도계로
+# 실측을 주고 있어서(odom1) 가속도 융합의 값어치가 낮다. 오류 경로를 통째로
+# 없애는 쪽이 한 변수만 바꾸는 실험으로도 깨끗하다.
+# 되돌리려면 마지막 줄을 [true, true, false] 로. GPS 음영 데드레코닝이 나빠지면
+# 끄는 대신 IMU 가속도에 r̂^2 을 곱하는 노드를 하나 더 두는 쪽으로 간다.
+imu0_config: [false, false, false,   # x,y,z position (IMU는 위치 정보 없음)
+              false, false, true,    # roll,pitch,yaw orientation - yaw만 신뢰
+              false, false, false,   # x,y,z velocity
+              false, false, true,    # roll,pitch,yaw velocity - angular_velocity.z(요레이트)
+              false, false, false]   # x,y,z acceleration - 위 주석 참고 (2026-08-29 끔)
+imu0_differential: false
+imu0_relative: false
+imu0_queue_size: 10
+imu0_remove_gravitational_acceleration: true
+
+# ---- GPS(navsat_transform_node가 UTM 변환한 로컬좌표) ----
+odom0: /odometry/gps
+odom0_config: [true,  true,  false,  # x,y position만 사용 (z는 2D라 무시)
+               false, false, false,
+               false, false, false,
+               false, false, false,
+               false, false, false]
+odom0_differential: false
+odom0_relative: false
+odom0_queue_size: 10
+
+# ---- 차량 속도계(/ego_status.velocity 기반, localization_node의
+#      EgoSpeedPreprocessor가 만듦) - GPS 음영구역 데드레코닝 보강용 ----
+# !!! CONFIRM 2026-08-06 실측으로 GPS 음영구역(약 118m) 오차 심함 확인됨 !!!
+# IMU 가속도만 두 번 적분하면 작은 편향도 시간제곱으로 누적됨. 차량 속도계는
+# 매 순간 실측값이라 적분오차가 안 쌓임 - 헤딩만 IMU로 잘 유지하면 이동거리
+# 자체는 훨씬 정확해짐(실차 바퀴속도계 융합과 같은 원리). twist.linear.x(차체
+# 좌표 종방향 속도)만 사용, position은 안 씀.
+# !!! 2026-08-27 변경: /odom/wheel_speed -> /odom/wheel_speed_scaled !!!
+# 원본 속도는 "시뮬 1초당 m" 인데 EKF 는 벽시계 dt 로 적분한다. 시뮬이 벽시계보다
+# r배 느리면 위치가 1/r 배 과전진한다(실측 r=0.48 -> /odom 이 GT 대비 +4m,
+# 구간에 따라 수십 m). wheel_speed_scaler.py 가 sim_rate_estimator 의 r̂ 로
+# vx*r, vy*r^2 로 줄여서 벽시계 단위로 맞춰 준다. vy 가 제곱인 이유는 그 노드
+# 머리말 참고 (localization_node 의 vy 적분 자체가 이미 1/r 배 부풀어 있다).
+#
+# ※ 스케일러가 안 떠 있으면 이 토픽이 아예 안 나와서 EKF 가 속도계를 통째로
+#   잃는다. sim_rate_estimator.py 와 wheel_speed_scaler.py 를 같이 띄울 것.
+odom1: /odom/wheel_speed_scaled
+# !!! 2026-08-29 변경: vy 융합을 껐다 (true,true -> true,false) !!!
+# vy 는 실측이 아니라 localization_node.cpp:441 이 만든 적분 추정치다:
+#     vy += (ay - vx*ω) · dt_wall
+# 실측(noaccel1)에서 /odom 횡오차를 요레이트별로 갈라보니 이 항의 모양 그대로다.
+#     직선 |w|<0.02   횡 RMS 0.779 m   (평균 +0.642 m - 왼쪽으로 상수 치우침)
+#     완만 0.02~0.10        0.997 m
+#     중간 0.10~0.25        1.094 m
+#     급커브 >0.25          1.190 m
+#   회전 방향을 따라 부호가 뒤집힌다: 좌회전 +1.340 m, 우회전 -0.400 m (둘 다 안쪽).
+#   ay·ω 가 들어가는 vy 말고는 이런 모양을 만들 게 없다. yaw 는 무죄로 확인했다
+#   (중앙 오차 0.17°, 커브에서도 1.4° 뒤처지는 쪽이라 안쪽 파고듦을 설명 못 함).
+#   직선의 상수 치우침은 vy_leak_idle 잔상으로 보인다(1초쯤 남는다고 적혀 있다).
+#
+# 앞서 imu0 의 ax·ay 를 껐는데 변화가 없었던 건, ay 가 경로가 둘인데 하나만
+# 껐기 때문이다: imu0 직접 융합(껐음) + localization_node 의 vy 적분(이번에 끔).
+#
+# GPS 입력 횡 RMS 는 0.11 m 인데 /odom 은 0.99 m 다. 그 차이를 만드는 게 이것으로
+# 보인다. vx 는 속도계 실측이라 남긴다 - 이러면 EKF 입력에 추정치가 하나도 없다.
+# 되돌리려면 [true, true, false] 로.
+odom1_config: [false, false, false,
+               false, false, false,
+               true,  false, false,  # vx(종방향)만. vy 는 위 주석 참고 (2026-08-29 끔)
+               false, false, false,
+               false, false, false]
+odom1_differential: false
+odom1_relative: false
+odom1_queue_size: 10
+
+# ---- (2026-08-08 제거) odom2: /odom/map_matched ----
+# GPS 음영구역 호길이 지도매칭을 EKF 입력으로 넣었다가, 실측에서 음영구역
+# 오차가 오히려 26m까지 튀어서 폐기함. localization_node에서 해당 코드도
+# 전부 삭제됨. 나중에 MGeo 기반으로 제대로 재설계할 예정.
+
+
+use_control: false
+
+# ---- 프로세스 노이즈(모델 예측 자체의 불확실성) ----
+# !!! CONFIRM 2026-08-08 추가 !!! 지금까지 GPS/IMU/속도계 "센서를 얼마나 믿을지"만
+# 튜닝했지, "매 스텝 내 예측모델이 얼마나 불확실한지"는 robot_localization 기본값
+# 그대로였음. 이걸 우리 상황(2D 지상주행, 위치/자세는 센서로 잘 구속됨, 속도는
+# 실제 주행 중 계속 바뀜)에 맞게 낮춰줌 - 값이 작을수록 "내 모델을 믿는다"는
+# 뜻이라 최종 출력이 더 매끄러워짐. 15x15 대각행렬,
+# [x,y,z,roll,pitch,yaw,vx,vy,vz,vroll,vpitch,vyaw,ax,ay,az] 순서.
+# ---- (2026-08-08 되돌림) process_noise_covariance ----
+# 검증 없이 값을 넣었다가, 직진구간조차 예전 최고기록(0.24m)보다 훨씬 나쁜
+# 0.81m로 나옴 + 회전구간에서 최대 1.68m까지 커지는 게 실측 확인됨(회전=모델이
+# 예상 못한 변화인데, 모델을 과신하게 만들어놔서 반응이 느려진 것으로 추정).
+# 원인 격리를 위해 일단 통째로 제거하고 robot_localization 기본값으로 되돌림 -
+# 재테스트해서 이게 정말 원인이었는지 확인 후, 필요하면 훨씬 보수적인 값으로
+# 다시 시도할 것.
+
+# !!! CONFIRM 2026-08-06 실측 확인 !!! oxdom-GT 오차벡터의 "방향"이 계속 바뀌는 걸
+# 확인함(원점/오프셋 문제였으면 방향이 거의 고정이어야 함) - 대신 크기가 시작
+# 13.5m급에서 끝날 땐 0.1m급으로 서서히 수렴하는 패턴. 즉 원점/좌표계는 정확한데,
+# EKF가 기본 초기 불확실성(initial_estimate_covariance)을 너무 작게(과신하게)
+# 잡고 시작해서 GPS를 조금씩만 반영하며 느리게 수렴하고 있었던 것으로 판단됨.
+# x,y,yaw 초기 불확실성을 크게 명시해서, 시작하자마자 첫 GPS 몇 번 만에 강하게
+# 수렴하도록 함. (initial_state는 아직 꺼둔 상태 - 대회 당일 정확히 START/END에서
+# 시작할 때만 그것도 같이 켜면 더 빨라짐)
+# 순서: 15x15 대각행렬, [x,y,z,roll,pitch,yaw,vx,vy,vz,vroll,vpitch,vyaw,ax,ay,az]
+initial_estimate_covariance: [1000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 1000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
+]
+
+# !!! CONFIRM 초반 불안정 대응 (2026-08-06 실측 확인) !!! 칼만필터는 시작 직후
+# 불확실성이 커서 초기 몇 초간 값이 튈 수 있음(정상적인 특성이지만, 대회 "출발"
+# 채점이 1분 이내 5% 지점 통과라 위험함). 대회는 항상 정확한 START/END
+# 체크포인트 위치/헤딩에서 시작한다는 걸 미리 아니까, EKF가 "엉뚱한 곳에서 시작해서
+# 정답으로 수렴하려고 요동치는" 대신 "처음부터 이미 맞는 값에서 시작"하게
+# !!! CONFIRM 2026-08-06 실측으로 역효과 확인됨 !!! 정확히 START/END 체크포인트에서
+# 출발 안 하고 그 근처(10.6m 정도 떨어진 곳)에서 테스트하니, EKF가 "체크포인트에서
+# 시작했다"고 강제로 믿은 편차가 주행 내내 안 씻겨나가고 평균 7.5m급 지속적인
+# 오프셋으로 남는 게 확인됨(음영구역 15m+ 스파이크랑은 별개 문제). 지금은 꺼둠 -
+# 실제로 정확히 START/END에서 출발하는 테스트/대회 당일에만 아래 주석 풀고 쓸 것.
+# initial_state: [-131.68979755061446, -428.3310229377821, 0.0,
+#                  0.0, 0.0, 1.0698541278595193,
+#                  0.0, 0.0, 0.0,
+#                  0.0, 0.0, 0.0,
+#                  0.0, 0.0, 0.0]

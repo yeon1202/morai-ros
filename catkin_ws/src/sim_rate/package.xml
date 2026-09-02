@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>sim_rate</name>
+  <version>0.0.0</version>
+  <description>
+    MORAI 시뮬 배속(sim rate) 보정.
+
+    시뮬은 물리를 "시뮬 시간" 으로 돌리는데 우리 ROS 스택엔 /clock 이 없어
+    모든 스탬프가 벽시계다. 그래서 EKF 가 "시뮬 1초당 m" 인 속도를 "벽시계 초"
+    인 dt 로 곱해 위치를 1/r 배 과전진시킨다. 이 패키지는 배속 r 을 GPS·속도계로
+    온라인 추정해서(sim_rate_estimator) 속도계 입력을 벽시계 단위로 환산한다
+    (wheel_speed_scaler). 빠른 머신에서 r≈1 이면 곱하기 1 이라 저절로 무동작이 된다.
+
+    localization.launch 는 팀 autonomous_driving 의 localization.launch 를 감싸서
+    이 두 노드를 같이 띄우고, 설정 파일을 이 패키지 것으로 바꿔 넘긴다.
+  </description>
+  <maintainer email="dev@todo.todo">dev</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>morai_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <!-- localization.launch 가 팀 스택을 include 한다 -->
+  <exec_depend>autonomous_driving</exec_depend>
+  <exec_depend>robot_localization</exec_depend>
+</package>

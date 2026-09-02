@@ -1,0 +1,101 @@
+<?xml version="1.0"?>
+<!--
+  localization 스택 + 시뮬 배속 보정. 2026-08-29.
+
+  실행:  roslaunch sim_rate localization.launch
+  전제:  udp_bridge 가 떠서 /gps /imu /ego_status 가 흐르고 있어야 한다.
+
+  ┌─ 토픽 흐름 ──────────────────────────────────────────────────────────┐
+  │  /gps        ─┐                                                      │
+  │  /imu        ─┤─> localization_node ─> /gps/fix                      │
+  │  /ego_status ─┘                        /imu/ekf                      │
+  │                                        /odom/wheel_speed ─┐          │
+  │  /gps/fix + /imu/ekf + /odom ─> navsat_transform ─> /odometry/gps    │
+  │                                                            │         │
+  │  sim_rate_estimator ─ /sim_rate ─> wheel_speed_scaler ─────┤         │
+  │                                    (vx * r)                │         │
+  │  /imu/ekf + /odometry/gps + /odom/wheel_speed_scaled ─> ekf ─> /odom │
+  └──────────────────────────────────────────────────────────────────────┘
+
+  ※ navsat <-> ekf 는 순환이다. robot_localization 의 표준 구성이라 정상이다 -
+    navsat 은 EKF 의 자세로 GPS 를 회전시키고, EKF 는 그 결과를 위치 보정에 쓴다.
+
+  왜 자립형인가 (팀 launch 를 include 하지 않는다)
+    팀 repo 에는 localization.launch 가 없고 localization_test.launch 만 있는데,
+    거기엔 config 경로가 박혀 있고 map->odom / base_link->lidar 정적 tf 도 없다.
+    include 로 엮으면 팀원 쪽에서 그대로 안 뜬다. 노드 정의를 여기 직접 두면
+    이 패키지 폴더 하나만 받아도 돌아간다.
+
+  ⚠️ udp_bridge 의 GPS 스탬프 되감기와 세트다. 브릿지가 GPS 도착시각에서 전송
+     지연(실측 0.30초)을 빼서 스탬프를 찍어야 하고, 그걸 EKF 가 받으려면
+     ekf.yaml 의 smooth_lagged_data 가 켜져 있어야 한다(이 패키지 config 에 켜져
+     있다). 브릿지 쪽이 없으면 되감기만 빠지고 나머지는 그대로 동작한다.
+
+  배속 보정을 끄고 원인 격리를 하고 싶으면:
+     roslaunch sim_rate localization.launch sim_rate:=false
+     ※ 그때는 config/ekf.yaml 의 odom1 도 /odom/wheel_speed 로 되돌려야 한다.
+-->
+<launch>
+  <arg name="config" default="$(find sim_rate)/config"/>
+  <!-- 배속 보정 스택(sim_rate_estimator + wheel_speed_scaler)을 띄울지 -->
+  <arg name="sim_rate" default="true"/>
+
+  <!-- 1) 센서 전처리 (팀 코드). /odom 을 내지 않는다. 아래 셋만 낸다. -->
+  <node pkg="autonomous_driving" type="localization_node" name="localization_node"
+        output="screen"/>
+
+  <!-- 2) 위경도 -> UTM52N -> 맵 로컬좌표.
+       datum [37.24294888, 126.77441945] 이 맵 원점이고, UTM52 로 변환하면
+       (302595.004, 4124145.004) 로 실측한 맵 원점과 1cm 이내로 맞는다.
+       기본 구독 토픽이 imu/data, odometry/filtered 라 remap 이 필요하다. -->
+  <node pkg="robot_localization" type="navsat_transform_node" name="navsat_transform_node"
+        clear_params="true" output="screen">
+    <rosparam command="load" file="$(arg config)/navsat_transform.yaml"/>
+    <remap from="imu/data"           to="/imu/ekf"/>
+    <remap from="odometry/filtered"  to="/odom"/>
+    <remap from="gps/fix"            to="/gps/fix"/>
+  </node>
+
+  <!-- 3) EKF 융합. 최종 /odom 을 낸다.
+       입력(imu0/odom0/odom1)은 ekf.yaml 에 토픽 이름이 직접 적혀 있어 remap 불필요. -->
+  <node pkg="robot_localization" type="ekf_localization_node" name="ekf_localization_node"
+        clear_params="true" output="screen">
+    <rosparam command="load" file="$(arg config)/ekf.yaml"/>
+    <remap from="odometry/filtered" to="/odom"/>
+  </node>
+
+  <!-- 4) map -> odom 정적 tf.
+       ekf.yaml 이 world_frame=odom 이라 /odom 의 frame_id 가 "odom" 으로 나온다.
+       (map 으로 두면 map->odom tf 를 역산할 재료가 없어 tf 를 아예 못 낸다.
+        robot_localization 소스 확인으로 확정. 위치 계산값은 동일하다.)
+       RViz Fixed Frame 이 map 이면 이 tf 가 없어 /odom 이 안 그려진다. 둘은 같은
+       원점이라 항등 변환으로 잇는다. 주행에는 영향 없고 시각화용이다. -->
+  <node pkg="tf2_ros" type="static_transform_publisher" name="map_to_odom"
+        args="0 0 0 0 0 0 map odom"/>
+
+  <!-- 5) base_link -> gps 정적 tf (GPS 안테나 장착 위치).
+       localization_node 가 /gps/fix 의 frame_id 를 "gps" 로 채우는데, navsat 이
+       안테나 오프셋을 빼려고 "gps -> base_link" tf 를 찾는다. 없으면
+       "Could not obtain transform from gps to base_link" 경고가 계속 뜬다.
+       MORAI 센서 설정에서 GPS 를 차량 기준점 (0,0,0) 으로 옮겼으므로 오프셋 0.
+       ※ 센서 위치를 바꾸면 이 값도 같이 바꿀 것. -->
+  <node pkg="tf2_ros" type="static_transform_publisher" name="base_link_to_gps"
+        args="0 0 0 0 0 0 base_link gps"/>
+
+  <!-- 6) base_link -> lidar 정적 tf (라이다 장착 위치).
+       perception 의 global_transform_node 가 물체를 라이다 좌표에서 전역좌표로
+       옮길 때 이 tf 를 찾는다. 없으면 "Could not obtain transform from lidar to
+       odom" 으로 아무것도 못 낸다.
+       값은 MORAI 센서 설정과 일치해야 한다 (2026-08-26 기준 x=1.4, y=0, z=1.23).
+       ※ args 순서: x y z yaw pitch roll parent child -->
+  <node pkg="tf2_ros" type="static_transform_publisher" name="base_link_to_lidar"
+        args="1.4 0 1.23 0 0 0 base_link lidar"/>
+
+  <!-- 7) 시뮬 배속 r 추정 (GPS + 속도계 + IMU. ground truth 안 씀) -->
+  <node if="$(arg sim_rate)" pkg="sim_rate" type="sim_rate_estimator.py"
+        name="sim_rate_estimator" output="screen"/>
+
+  <!-- 8) 속도계를 벽시계 단위로 환산해서 EKF 에 넘긴다 -->
+  <node if="$(arg sim_rate)" pkg="sim_rate" type="wheel_speed_scaler.py"
+        name="wheel_speed_scaler" output="screen"/>
+</launch>
