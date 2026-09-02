@@ -5,6 +5,14 @@
 모든 명령은 컨테이너 `morai-dev` 안에서 돈다. 앞부분이 길어 아래처럼 줄여 쓴다.
 
 ```bash
+roslaunch path_tracking sim.launch
+./sync_to_team.sh           # 뭐가 바뀌는지 보여주기만 (안전)
+./sync_to_team.sh --apply   # 실제로 팀 repo에 반영
+./sync_to_team.sh --no-build   # 빌드 검사 건너뛰기 (빠르게 볼 때)
+rosrun rqt_tf_tree rqt_tf_tree    # tf tree 
+```
+
+```bash
 # 이 문서에서 "DEV" 라고 쓰면 아래를 뜻한다
 alias DEV='docker exec -it morai-dev bash -lc'
 ```
