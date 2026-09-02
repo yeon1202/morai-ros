@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 """
-UDP <-> ROS ë¸Œë¦¿ì§€ (GPS/IMU/ì¹´ë©”ë¼x3/LiDAR í†µí•©íŒ)
+UDP <-> ROS 브릿지 (GPS/IMU/카메라x3/LiDAR 통합판)
 ------------------------------------------------
-MORAIì™€ëŠ” UDPë¡œ, ìš°ë¦¬ ì»¨íŠ¸ë¡¤ëŸ¬/ì¸ì§€ ë…¸ë“œë“¤ê³¼ëŠ” ROS í† í”½ìœ¼ë¡œ í†µì‹ í•©ë‹ˆë‹¤.
+MORAI와는 UDP로, 우리 컨트롤러/인지 노드들과는 ROS 토픽으로 통신합니다.
 
-ë°œí–‰:
-  /ego_status              (morai_msgs/EgoVehicleStatus, í•„ìš”í•œ í•„ë“œë§Œ)
+발행:
+  /ego_status              (morai_msgs/EgoVehicleStatus, 필요한 필드만)
   /gps                     (morai_msgs/GPSMessage) - NMEA 0183(GPRMC/GPGGA)
-  /imu                     (sensor_msgs/Imu) - ì‹¤ì°¨ í…ŒìŠ¤íŠ¸ë¡œ ì¶•/ë¶€í˜¸ ê²€ì¦ ì™„ë£Œ
+  /imu                     (sensor_msgs/Imu) - 실차 테스트로 축/부호 검증 완료
   /camera1/image_jpeg/compressed  (sensor_msgs/CompressedImage)
   /camera2/image_jpeg/compressed  (sensor_msgs/CompressedImage)
   /camera3/image_jpeg/compressed  (sensor_msgs/CompressedImage)
-  /lidar/points             (sensor_msgs/PointCloud2) - í‘œì¤€ Velodyne VLP-16 íŒ¨í‚· ë””ì½”ë”©
-êµ¬ë…:
-  /ctrl_cmd                (morai_msgs/CtrlCmd) -> UDPë¡œ ë³€í™˜í•´ì„œ MORAIë¡œ ì „ì†¡
+  /lidar/points             (sensor_msgs/PointCloud2) - 표준 Velodyne VLP-16 패킷 디코딩,
+                            포인트별 정밀시각 기반 모션 왜곡(motion distortion) 보정 포함
+  ※ 아래 둘은 팀 원본에 없고 이 작업본에만 있다:
+  /CollisionData           (morai_msgs/CollisionData) - 충돌 감지, 회피 검증 자동화용
+  /ego_link_id             (std_msgs/String) - MGeo 링크 ID
+구독:
+  /ctrl_cmd                (morai_msgs/CtrlCmd) -> UDP로 변환해서 MORAI로 전송
 
-ê° íŒ¨í‚· í¬ë§·ì€ udp_packet_inspector.py / camera_packet_probe.py / camera_frame_save.pyë¡œ
-ì‹¤ì œ ìº¡ì²˜í•´ì„œ ê²€ì¦í•œ ê²ƒìž…ë‹ˆë‹¤ (GPS: í‘œì¤€ NMEA, IMU: ì‹¤ì°¨ í…ŒìŠ¤íŠ¸ë¡œ ì¶• ê²€ì¦ ì™„ë£Œ,
-ì¹´ë©”ë¼: SOI~EOI ìž˜ë¼ë‚´ë©´ ì™„ì „í•œ JPEG í•œ ìž¥, LiDAR: í‘œì¤€ Velodyne VLP-16 1206ë°”ì´íŠ¸ í¬ë§·).
+각 패킷 포맷은 udp_packet_inspector.py / camera_packet_probe.py / camera_frame_save.py로
+실제 캡처해서 검증한 것입니다 (GPS: 표준 NMEA, IMU: 실차 테스트로 축 검증 완료,
+카메라: Index/Size/Tail로 조각 재조립(SD는 조각 1개, HD는 여러 개),
+LiDAR: 표준 Velodyne VLP-16 1206바이트 포맷).
 """
 import math
 import socket
@@ -31,21 +36,29 @@ from geometry_msgs.msg import Vector3, Quaternion
 from std_msgs.msg import Header, String
 
 DEST_IP = "127.0.0.1"
-CTRL_CMD_PORT = 9093          # MORAI Network Settingsì˜ Host PORTëž‘ ì¼ì¹˜í•´ì•¼ í•¨
-EGO_INFO_RECV_PORT = 9111     # [개발검증용 임시] 규정제출시 9109(Competition)로 복구!
+CTRL_CMD_PORT = 9093          # MORAI Network Settings의 Host PORT랑 일치해야 함
+# 9109 = Competition Vehicle Status (대회 규정 허용 채널). position 이 0,0,0 으로 온다.
+# 9111 = Ego Vehicle Status (ground truth). 개발 검증용이고 제출본에 쓰면 실격이다.
+#
+# !!! 2026-08-29 9111 -> 9109 로 전환 !!!
+# 이제 planning 이 위치를 /ego_status 가 아니라 /odom(GPS+IMU 융합)에서 받는다.
+# 9109 는 velocity 는 그대로 주므로(localization_node 의 EgoSpeedPreprocessor 가
+# 대회채널에서도 쓴다고 확인됨) 속도계 경로는 영향 없다.
+#
+# ⚠️ 되돌릴 때: 진단 도구(diag_latency/analyze_latency)는 GT 위치가 있어야 오차를
+#   잴 수 있다. 측정할 때만 9111 로 바꾸고, 제출본은 반드시 9109 여야 한다.
+EGO_INFO_RECV_PORT = 9109
 GPS_RECV_PORT = 2503
 IMU_RECV_PORT = 2505
 CAMERA_PORTS = {1: 2507, 2: 2509, 3: 2511}
 LIDAR_RECV_PORT = 2501
-# CollisionData 수신 포트. 규정 허용 채널이라 써도 된다.
-# MORAI Network Settings 의 CollisionData 항목 Destination PORT 와 맞출 것.
-# 0 으로 두면 이 기능을 끈다(항목을 안 켰을 때 포트만 점유하지 않도록).
+# 충돌 감지 (회피 검증 자동화용, 규정 허용 채널). 0 이면 수신 안 함.
 COLLISION_RECV_PORT = 9092
 
 STEER_RATIO_CORRECTION = 0.70
 STEER_SIGN = 1.0
 
-# ---- VLP-16 í‘œì¤€ ìŠ¤íŽ™ (Velodyne ê³µì‹ ì±„ë„ë³„ ìˆ˜ì§ê°ë„, ê³µê°œëœ ê°’) ----
+# ---- VLP-16 표준 스펙 (Velodyne 공식 채널별 수직각도, 공개된 값) ----
 VLP16_VERTICAL_ANGLES_DEG = [
     -15, 1, -13, 3, -11, 5, -9, 7, -7, 9, -5, 11, -3, 13, -1, 15
 ]
@@ -96,25 +109,6 @@ class EgoInfoReceiverUDP:
             vel_x, vel_y, vel_z = struct.unpack('fff', raw_data[101:113])
             ang_vel_x, ang_vel_y, ang_vel_z = struct.unpack('fff', raw_data[113:125])
             front_steer = struct.unpack('f', raw_data[137:141])[0]
-            # MGeo 링크 ID (12바이트 ASCII, 예: "A2256W000748").
-            #
-            # 규정 허용 채널인 9109(181B)에도 실려 온다 - 2026-08-06 실측 확인.
-            # 시뮬이 "지금 이 링크 위에 있다" 를 직접 알려주므로 최근접 탐색이 필요 없다.
-            #
-            # 지금은 위치가 정확해서(개발 중 9111 = ground truth) 최근접 탐색으로도
-            # 충분하다. 경로 위 40지점 표본에서 1순위/2순위 링크 거리차 중앙값이
-            # 3.50m(차로폭)라 위치오차 0.171m 로는 안전하다.
-            #
-            # 값어치가 나오는 곳은 두 군데다.
-            #   - 교차로·분기점: 40지점 중 5곳은 거리차가 1m 미만이다. 위치 오차 0.5m 만으로
-            #     다른 링크를 고르는데, 하필 신호등·합류가 있는 곳이라 related_signal 이나
-            #     can_move_*_lane 을 잘못 읽으면 판단이 틀린다.
-            #   - 이상 감지: path_manager 의 최근접 idx 가 가리키는 링크와 이 값이 다르면
-            #     "위치 추정이 틀렸다" 를 직접 알 수 있다.
-            #
-            # 주의: GPS 음영구간에는 도움이 안 된다. 118m 를 지나는 동안 링크 전이가
-            # 2회뿐이고 그중 하나가 119m 짜리라 사실상 내내 같은 링크다. 추측항법 오차를
-            # 잡는 용도로 쓸 수 없다.
             link_id = raw_data[141:153].decode(errors="ignore").rstrip('\x00').strip()
             return {
                 "gear": gear, "pos": (pos_x, pos_y, pos_z), "yaw_deg": yaw,
@@ -126,7 +120,7 @@ class EgoInfoReceiverUDP:
 
 
 class GpsReceiverUDP:
-    """NMEA 0183 í…ìŠ¤íŠ¸(GPRMC/GPGGA)."""
+    """NMEA 0183 텍스트(GPRMC/GPGGA)."""
 
     def __init__(self, ip, port, callback):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -177,8 +171,8 @@ class GpsReceiverUDP:
 
 
 class ImuReceiverUDP:
-    """MORAI ì»¤ìŠ¤í…€ ë°”ì´ë„ˆë¦¬ IMU íŒ¨í‚·. ì‹¤ì°¨ í…ŒìŠ¤íŠ¸ë¡œ ì¶•/ë¶€í˜¸ ê²€ì¦ ì™„ë£Œ
-    (ì •ì§€ì‹œ linear_acceleration.z=9.81, ì¢ŒíšŒì „ì‹œ angular_velocity.z ì–‘ìˆ˜ = ENU ì •í•©)."""
+    """MORAI 커스텀 바이너리 IMU 패킷. 실차 테스트로 축/부호 검증 완료
+    (정지시 linear_acceleration.z=9.81, 좌회전시 angular_velocity.z 양수 = ENU 정합)."""
     HEADER = '#IMUData$'
 
     def __init__(self, ip, port, callback):
@@ -213,12 +207,14 @@ class ImuReceiverUDP:
 
 
 class CameraReceiverUDP:
-    """모라이 공식 카메라 UDP 프로토콜 (26.R1 기준, Timestamp 필드 추가된 버전).
-    프레임 하나가 여러 UDP 패킷(조각)으로 나뉘어 올 수 있어서 Index/Size/Tail로 재조립한다.
+    """MORAI 공식 카메라 UDP 프로토콜 (Timestamp 필드 포함된 버전).
+    프레임 하나가 여러 UDP 패킷(조각)으로 나뉘어 올 수 있어서 Index/Size/Tail로 재조립함.
+    (SD 카메라처럼 조각이 1개뿐이면 바로 합쳐지고, HD처럼 여러 개면 순서대로 모아서 합침)
 
-    패킷 구조 (총 65000 byte 고정):
+    패킷 구조 (총 65000바이트 고정):
       Header(3B)="MOR" + Timestamp(8B) + Index(4B) + Size(4B)
-      + Partial JPEG Data(64979B, 뒤는 0 패딩, 앞 Size바이트만 유효) + Tail(2B)="AI"/"EI"(마지막 조각)
+      + Partial JPEG Data(64979B, 앞에서 Size바이트만 유효, 나머지는 0 패딩)
+      + Tail(2B) - 마지막 조각이면 "EI"
     """
 
     HEADER = b'MOR'
@@ -251,7 +247,7 @@ class CameraReceiverUDP:
         tail = data[self.DATA_OFFSET + self.DATA_FIELD_LEN:self.DATA_OFFSET + self.DATA_FIELD_LEN + 2]
 
         if index == 0:
-            self._chunks = {}
+            self._chunks = {}  # 새 프레임 시작 -> 이전에 덜 모인 조각은 버림
         self._chunks[index] = data[self.DATA_OFFSET:self.DATA_OFFSET + size]
 
         if tail == self.TAIL_LAST:
@@ -261,19 +257,24 @@ class CameraReceiverUDP:
 
 
 class Vlp16ReceiverUDP:
-    """í‘œì¤€ Velodyne VLP-16 UDP ë°ì´í„° íŒ¨í‚· (ê³µê°œ ìŠ¤íŽ™, 1206ë°”ì´íŠ¸) ë””ì½”ë”©.
-    í•œ ë°”í€´(360ë„) ë‹¤ ëŒë©´(ë°©ìœ„ê°ì´ í™• ìž‘ì•„ì§€ëŠ” ì§€ì  = wrap-around) ê·¸ë•Œê¹Œì§€ ëª¨ì€
-    ì ë“¤ì„ PointCloud2 í•˜ë‚˜ë¡œ ë¬¶ì–´ì„œ ë°œí–‰.
+    """표준 Velodyne VLP-16 UDP 데이터 패킷 (공개 스펙, 1206바이트) 디코딩.
+    한 바퀴(360도) 다 돌면(방위각이 확 작아지는 지점 = wrap-around) 그때까지 모은
+    점들을 PointCloud2 하나로 묶어서 발행.
 
-    !! CONFIRM: ì¢Œí‘œì¶•(x=ì˜¤ë¥¸ìª½,y=ì•ž,z=ìœ„) ê´€ë¡€ê°€ ìš°ë¦¬ ENU ì¢Œí‘œê³„ëž‘ ë§žëŠ”ì§€, ê·¸ë¦¬ê³ 
-       ë°©ìœ„ê° ê¸°ì¤€(0ë„ê°€ ì •ë©´ì¸ì§€)ë„ ì‹¤ì œë¡œ ë¬¼ì²´ ë†“ê³  ê²€ì¦ í•„ìš”. ì§€ê¸ˆì€ Velodyne
-       ê³µì‹ ë¬¸ì„œ ê¸°ì¤€ ê´€ë¡€ë¥¼ ê·¸ëŒ€ë¡œ ì‚¬ìš©."""
+    좌표축: x=전방, y=좌측, z=위 (REP-103 오른손좌표계 표준: x×y=z).
+    Velodyne 공식 문서의 raw 공식은 원래 x=sin(az)/y=cos(az)(x=오른쪽,y=앞)이지만,
+    이 프로젝트 전체 관례에 맞춰 x,y 스왑 + y 부호 반전해서 사용
+    (2026-08-05 x,y 스왑 확정 -> 같은 날 REP-103 정합 위해 y 부호 반전 추가 확정)."""
 
     PACKET_LEN = 1206
     BLOCK_LEN = 100
     NUM_BLOCKS = 12
-    CHANNELS_PER_BLOCK = 32  # 16ì±„ë„ x 2 firing sequence
+    CHANNELS_PER_BLOCK = 32  # 16채널 x 2 firing sequence
     FLAG = 0xEEFF
+    # VLP-16 싱글 리턴 모드 firing 타이밍 (공식 스펙, 모션왜곡 보정용 포인트별 정밀시각 계산에 사용).
+    # 패킷당 firing sequence 24개(블록 12 x 시퀀스 2), 시퀀스 간 55.296us, 시퀀스 내 채널 간 2.304us.
+    FIRING_SEQ_US = 55.296
+    CHANNEL_US = 2.304
 
     def __init__(self, ip, port, callback):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -291,6 +292,11 @@ class Vlp16ReceiverUDP:
             self._parse_packet(raw_data)
 
     def _parse_packet(self, data):
+        # 패킷 끝 6바이트(offset 1200~1205) = Timestamp(4B, 정시 기준 마이크로초) + Factory(2B,
+        # return mode/product id). 값 정상 수신 확인 완료(2026-08-06, product_id=0x22=VLP-16) -
+        # 이제 모션 왜곡 보정용 포인트별 정밀 시각 계산에 사용.
+        timestamp_us = struct.unpack('<I', data[1200:1204])[0]
+
         for b in range(self.NUM_BLOCKS):
             off = b * self.BLOCK_LEN
             flag = struct.unpack('<H', data[off:off + 2])[0]
@@ -299,7 +305,7 @@ class Vlp16ReceiverUDP:
             azimuth_raw = struct.unpack('<H', data[off + 2:off + 4])[0]
             azimuth_deg = azimuth_raw / 100.0
 
-            # íšŒì „ í•œ ë°”í€´(360ë„) ì™„ë£Œ ê°ì§€: ë°©ìœ„ê°ì´ í¬ë‹¤ê°€ ê°‘ìžê¸° í™• ìž‘ì•„ì§€ë©´ wrap
+            # 회전 한 바퀴(360도) 완료 감지: 방위각이 크다가 갑자기 확 작아지면 wrap
             if self._prev_azimuth is not None and azimuth_deg < self._prev_azimuth - 300:
                 if self._points:
                     self._callback(self._points)
@@ -307,22 +313,26 @@ class Vlp16ReceiverUDP:
             self._prev_azimuth = azimuth_deg
 
             az_rad = math.radians(azimuth_deg)
-            # 32ê°œ ì±„ë„(16ì±„ë„ x 2 firing sequence) - ë‘ ì‹œí€€ìŠ¤ ëª¨ë‘ ì´ ë¸”ë¡ì˜ azimuthë¥¼
-            # ê·¸ëŒ€ë¡œ ì”€ (ì •ë°€ ë³´ê°„ ìƒëžµ, í•„ìš”ì‹œ ë‚˜ì¤‘ì— ì •ë°€í™” ê°€ëŠ¥)
+            # 32개 채널(16채널 x 2 firing sequence) - 두 시퀀스 모두 이 블록의 azimuth를
+            # 기하 계산(각도)엔 그대로 쓰지만, 시각(t_us)은 시퀀스/채널별로 정밀 계산.
             ch_off = off + 4
             for seq in range(2):
+                firing_seq_idx = b * 2 + seq  # 패킷 내 firing sequence 번호 (0~23)
                 for ch in range(16):
                     coff = ch_off + (seq * 16 + ch) * 3
                     distance_raw = struct.unpack('<H', data[coff:coff + 2])[0]
                     reflectivity = data[coff + 2]
                     if distance_raw == 0:
-                        continue  # ë¬´ë°˜ì‚¬(ì¸¡ì • ì‹¤íŒ¨)
-                    distance_m = distance_raw * 0.002  # 2mm ë‹¨ìœ„
+                        continue  # 무반사(측정 실패)
+                    distance_m = distance_raw * 0.002  # 2mm 단위
                     vert = VLP16_VERTICAL_ANGLES_RAD[ch]
-                    x = distance_m * math.cos(vert) * math.sin(az_rad)
-                    y = distance_m * math.cos(vert) * math.cos(az_rad)
+                    # x=전방,y=좌측 관례로 스왑+부호반전 (Velodyne raw 공식은 원래 x=오른쪽,y=앞)
+                    x = distance_m * math.cos(vert) * math.cos(az_rad)
+                    y = -distance_m * math.cos(vert) * math.sin(az_rad)
                     z = distance_m * math.sin(vert)
-                    self._points.append((x, y, z, float(reflectivity)))
+                    t_us = (timestamp_us + self.FIRING_SEQ_US * firing_seq_idx
+                            + self.CHANNEL_US * ch)
+                    self._points.append((x, y, z, float(reflectivity), t_us))
 
 
 class CollisionReceiverUDP:
@@ -399,7 +409,15 @@ class CollisionReceiverUDP:
 
 class UdpBridge:
     def __init__(self):
+        # 라이다 모션 왜곡 보정용 최신 차량 상태 (아직 /ego_status, /imu 못 받았으면 0 = 무보정).
+        self._forward_speed_mps = 0.0
+        self._yaw_rate_rad_s = 0.0
+
         self.ctrl = CtrlCmdUDP(DEST_IP, CTRL_CMD_PORT)
+
+        # GPS 전송 지연 보정값 [초]. 아래 _on_gps 주석 참고.
+        # 대회장 머신에서는 재측정해서 이 파라미터만 바꾸면 된다.
+        self.gps_lag = rospy.Duration(rospy.get_param('~gps_lag_sec', 0.30))
 
         self.ego_pub = rospy.Publisher('/ego_status', EgoVehicleStatus, queue_size=1)
         self.gps_pub = rospy.Publisher('/gps', GPSMessage, queue_size=1)
@@ -474,6 +492,21 @@ class UdpBridge:
         out.front_steer_angle = data["front_steer_deg"]
         self.ego_pub.publish(out)
 
+        # vel_x/vel_y의 정확한 축 관례는 검증 전이라(라이다처럼 스왑/부호반전이 필요할 수도
+        # 있음) 안 믿고, 크기(속력)만 써서 "거의 항상 전방으로 움직인다"는 근사로 라이다
+        # 모션왜곡 보정에 사용 - 회전축 부호는 이미 검증된 IMU 쪽(_on_imu)에서 가져옴.
+        # !! 팀 원본 버그 수정 (2026-08-26) !!
+        # 팀 코드는 `math.hypot(vx, vy)` 를 그대로 _forward_speed_mps 에 넣는데,
+        # ego UDP 패킷의 vel 은 m/s 가 아니라 **km/h** 다. 그대로 쓰면 속도를
+        # 3.6배로 보고 모션왜곡 보정이 그만큼 과하게 걸린다(43km/h 주행 시
+        # 점을 최대 4.3m 밀어버린다 - 정답은 1.2m). 보정을 안 하느니만 못하다.
+        #
+        # 근거: pilot2 로그에서 velocity.x 원값 43.00 일 때 실제 지면속도가
+        # 11.50 m/s = 43/3.6 로 측정됨. 팀 localization_node.cpp 도
+        # `msg->velocity.x / 3.6  // km/h -> m/s` 로 같은 변환을 한다.
+        vx, vy, _ = data["vel"]
+        self._forward_speed_mps = math.hypot(vx, vy) / 3.6
+
         # MGeo 링크 ID. EgoVehicleStatus 에 담을 자리가 없어 별도 토픽으로 낸다.
         # 소비자는 link_set.json 에서 max_speed / can_move_*_lane / related_signal 등을
         # 바로 조회할 수 있다.
@@ -481,8 +514,25 @@ class UdpBridge:
             self.link_pub.publish(String(data=data["link_id"]))
 
     def _on_gps(self, lat, lon, alt):
+        """MORAI 의 GPS 전송 지연만큼 스탬프를 과거로 찍는다.
+
+        패킷이 우리 소켓에 도착한 시각은 그 위경도가 "측정된" 시각이 아니다.
+        MORAI 가 센서를 시뮬레이션하고 직렬화해 UDP 로 보내는 데 시간이 걸린다.
+        rospy.Time.now() 를 그대로 쓰면 0.3초 묵은 관측에 "방금" 도장을 찍는
+        셈이고, EKF 는 스탬프를 물리적 사실로 믿으므로 현재 위치를 0.3초 전
+        지점으로 끌어당긴다. 11m/s 에서 3.4m 다.
+
+        실측 0.30초 (2026-08-27). lat_navsat_* 를 GT 대비 tau 만큼 밀어보며
+        잔차가 최소가 되는 tau 를 찾았다. 잔차 중앙값이 2.1~2.9m -> 0.47~0.67m.
+        배속이 1.57배 차이나는 두 런(0.615 / 0.964)에서 tau 가 같게 나왔으므로,
+        시뮬 프레임 수가 아니라 벽시계 기준 상수(전송 지연)로 본다.
+
+        ※ ekf.yaml 의 smooth_lagged_data 가 켜져 있어야 한다. 꺼져 있으면
+          robot_localization 이 자기 상태보다 오래된 관측을 그냥 버려서
+          ("history interval is 0, so ignoring") GPS 를 통째로 잃는다.
+        """
         out = GPSMessage()
-        out.header.stamp = rospy.Time.now()
+        out.header.stamp = rospy.Time.now() - self.gps_lag
         out.latitude = lat
         out.longitude = lon
         out.altitude = alt
@@ -499,6 +549,10 @@ class UdpBridge:
         out.angular_velocity = Vector3(*data["angular_velocity"])
         out.linear_acceleration = Vector3(*data["linear_acceleration"])
         self.imu_pub.publish(out)
+
+        # angular_velocity.z는 이미 축/부호 검증됨(좌회전=양수, ENU/REP-103 정합) - 라이다
+        # 모션왜곡 보정의 요레이트로 그대로 사용.
+        self._yaw_rate_rad_s = data["angular_velocity"][2]
 
     def _make_camera_callback(self, cam_id):
         def _cb(jpeg_bytes):
@@ -520,7 +574,10 @@ class UdpBridge:
             PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
             PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1),
         ]
-        arr = np.array(points, dtype=np.float32)
+        arr = np.array(points, dtype=np.float64)  # x,y,z,intensity,t_us
+        xy = self._deskew_xy(arr[:, 0], arr[:, 1], arr[:, 4])
+        out_arr = np.column_stack([xy, arr[:, 2], arr[:, 3]]).astype(np.float32)
+
         cloud = PointCloud2()
         cloud.header = header
         cloud.height = 1
@@ -530,8 +587,23 @@ class UdpBridge:
         cloud.point_step = 16  # 4 floats x 4 bytes
         cloud.row_step = cloud.point_step * len(points)
         cloud.is_dense = True
-        cloud.data = arr.tobytes()
+        cloud.data = out_arr.tobytes()
         self.lidar_pub.publish(cloud)
+
+    def _deskew_xy(self, x, y, t_us):
+        """모션 왜곡(motion distortion) 보정 - 한 바퀴(100ms) 도는 동안 차가 움직인 만큼
+        점마다 다른 시각에 찍힌 걸, 스캔 마지막 시점(t_ref) 기준 좌표로 되돌림.
+        2D 등속+등각속도 근사(bicycle model) - dt가 최대 100ms라 이 근사로 충분.
+        전방속도는 크기만(축관례 미검증), 요레이트는 IMU(검증됨)에서 가져옴."""
+        t_ref = t_us.max()
+        dt = (t_ref - t_us) * 1e-6  # 스캔 끝보다 얼마나 먼저 찍혔는지 (초, >=0)
+        dtheta = self._yaw_rate_rad_s * dt
+        dx = self._forward_speed_mps * dt
+        cos_t, sin_t = np.cos(dtheta), np.sin(dtheta)
+        x_shift = x - dx
+        new_x = cos_t * x_shift + sin_t * y
+        new_y = -sin_t * x_shift + cos_t * y
+        return np.column_stack([new_x, new_y])
 
 
 def main():
