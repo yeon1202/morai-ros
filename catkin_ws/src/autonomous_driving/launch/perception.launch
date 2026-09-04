@@ -1,0 +1,84 @@
+<?xml version="1.0"?>
+<!--
+  팀 perception 스택 실행 (2026-08-27 planning 이 작성).
+
+  실행:  roslaunch autonomous_driving perception.launch
+  전제:  udp_bridge (/lidar/points, /camera1/…) 와
+         localization.launch (tf: base_link->lidar, odom->base_link) 가 떠 있어야 한다.
+
+  ┌─ 흐름 ──────────────────────────────────────────────────────────────────┐
+  │ /lidar/points ─> lidar_node ──────────┐                                 │
+  │                                       ├─> object_fusion                 │
+  │ /camera1/…    ─> camera_detection ────┘        └─> /perception/recognized_objects
+  │                    (YOLO, GPU, py3.9)                    (lidar 프레임)  │
+  │                                                                ↓        │
+  │                             global_transform ─> …_global ─> tracking    │
+  │                             (tf: lidar->base_link->odom)       ↓        │
+  │                                              /perception/tracked_objects │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  이 뒤는 planning 몫이다 - object_topic_adapter 가 /Object_topic 으로 옮긴다.
+  설계 근거는 docs/24-perception_integration_design.md 참고.
+-->
+<launch>
+  <!-- camera:=false 면 YOLO 없이 라이다 클러스터링만 돈다.
+       주의: object_fusion 이 라이다와 카메라를 둘 다 기다리는 구조라
+       (ApproximateTimeSynchronizer), 카메라를 끄면 그 뒤 단계가 전부 멈춘다.
+       라이다 클러스터(/lidar/clusters)만 눈으로 볼 때 쓰는 옵션이다. -->
+  <arg name="camera" default="true"/>
+
+  <!-- 캘리브레이션/트래킹 확인용 디버그 노드 (기본 꺼짐).
+       카메라 영상에 YOLO bbox(파랑)와 트래킹된 물체의 투영(초록, unique_id)을 겹쳐
+       /perception/calibration_check/compressed 로 낸다.
+       "YOLO 는 앞차를 봤는데 planning 은 왜 못 봤나" 를 눈으로 가를 때 쓴다 -
+       파랑만 있고 초록이 없으면 라이다 클러스터가 안 붙은 것이고, 초록이 옆으로
+       밀려 있으면 캘리브레이션/위치 문제다. -->
+  <arg name="enable_calibration_check" default="false"/>
+
+  <!-- 1) 라이다: 지면 제거 + DBSCAN 클러스터링 + OBB
+       ROI/자차박스/지면문턱 기본값은 팀 센서 배치(마운트 x=1.4, z=1.23) 기준이다.
+       MORAI 센서를 옮기면 이 노드의 rosparam 도 같이 봐야 한다. -->
+  <node pkg="autonomous_driving" type="lidar_node.py" name="lidar_node" output="screen"/>
+
+  <!-- 2) 카메라 YOLO 2D 검출.
+       type 이 .py 가 아니라 래퍼 셸인 이유는 이 노드만 Python 3.9 로 돌려야 하기
+       때문이다 (스크립트 안 주석 참고).
+
+       img_size: 팀 기본값 416 은 CPU 환경 기준이다. 우리는 GPU 라 640 으로 올린다.
+         실측(2026-08-27, RTX 5070): 640 에서 3.8ms/frame(260Hz), VRAM 59MB.
+         카메라가 15Hz 라 여유가 아주 많다.
+       model_path: 팀이 MORAI 화면으로 파인튜닝한 가중치를 쓴다 (클래스 2개: car, person).
+         2026-09-03 까지 /opt/yolo39/yolo11n.pt (COCO 사전학습본)를 쓰고 있었다.
+         그건 대회장에서 인터넷 없이도 돌게 하려고 이미지에 미리 받아둔 것인데,
+         팀 best.pt 를 가져온 뒤에도 이 줄을 안 고쳐서 계속 그게 돌았다.
+         실측(2026-09-03 주행): 보행자 검출 0건, 인지 원본에 COCO 클래스인
+         train/chair 가 섞여 나왔다(best.pt 에는 없는 클래스라 여기서 드러났다).
+         ※ best.pt 는 repo 안에 있으므로 인터넷 의존이 없다. -->
+  <node if="$(arg camera)" pkg="autonomous_driving" type="run_camera_detection_39.sh"
+        name="camera_detection_node" output="screen">
+    <param name="model_path"     value="$(find autonomous_driving)/src/perception/weights/best.pt"/>
+    <param name="img_size"       value="640"/>
+    <param name="conf_threshold" value="0.4"/>
+  </node>
+
+  <!-- 3) 라이다 클러스터 + 카메라 검출 융합 (시각 동기화, slop 0.05s) -->
+  <node if="$(arg camera)" pkg="autonomous_driving" type="object_fusion_node.py"
+        name="object_fusion_node" output="screen"/>
+
+  <!-- 4) 라이다 좌표 -> 전역(odom) 좌표.
+       tf 를 쓰므로 base_link->lidar (localization.launch) 와
+       odom->base_link (ekf_localization_node) 가 둘 다 있어야 한다.
+       ※ 이 좌표에는 EKF 오차가 실린다(횡 RMS ~1m 실측). 설계 4.1/8.1 참고. -->
+  <node if="$(arg camera)" pkg="autonomous_driving" type="global_transform_node.py"
+        name="global_transform_node" output="screen"/>
+
+  <!-- 5) 칼만 추적. unique_id 와 velocity 를 채운다.
+       3프레임 연속 잡혀야 발행하고(MIN_HITS_TO_CONFIRM) 5프레임 놓치면 지운다
+       (MAX_MISSES) - 깜빡임 보정이 여기 있으므로 어댑터에서 또 하지 않는다. -->
+  <node if="$(arg camera)" pkg="autonomous_driving" type="tracking_node.py"
+        name="tracking_node" output="screen"/>
+
+  <!-- 6) (선택) 캘리브레이션 확인. tracked_objects 를 쓰므로 5)까지 떠 있어야 한다. -->
+  <node if="$(arg enable_calibration_check)" pkg="autonomous_driving"
+        type="calibration_check_node.py" name="calibration_check_node" output="screen"/>
+</launch>
