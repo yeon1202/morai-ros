@@ -4,8 +4,7 @@
 
 실행:
   docker exec morai-dev bash -lc \
-    'cd /home/dev/catkin_ws && source devel/setup.bash && \
-     python3 src/path_tracking/scripts/test_object_convert.py'
+    'source ~/catkin_ws/devel/setup.bash && rosrun path_tracking test_object_convert.py'
 """
 import math
 import os

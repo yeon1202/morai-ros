@@ -6,7 +6,7 @@ test_object_convert.py 와 같은 이유로 분리했다 - 대회 당일 회귀�
 돌릴 수 있어야 한다.
 
 실행:
-  python3 src/path_tracking/scripts/test_perception_stats.py
+  rosrun path_tracking test_perception_stats.py
 """
 import os
 import sys
