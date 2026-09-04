@@ -63,6 +63,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rospy
 from nav_msgs.msg import Odometry
 from morai_msgs.msg import EgoVehicleStatus, ObjectStatusList
+from autonomous_driving.msg import RecognizedObjectArray
 
 from lib.logdir import default_log_dir
 from lib.perception_stats import Detection, summarize
@@ -103,9 +104,20 @@ class DiagPerception:
         self.f_obj = open(os.path.join(out_dir, 'percobj_%s.csv' % tag), 'w')
         self.f_odom = open(os.path.join(out_dir, 'percodom_%s.csv' % tag), 'w')
         self.f_gt = open(os.path.join(out_dir, 'percgt_%s.csv' % tag), 'w')
+        # 인지 원본. /Object_topic 에는 없는 필드를 여기서만 얻을 수 있다.
+        #
+        # 왜 따로 받나 (2026-09-03)
+        #   경로 옆 1.5~1.8m 에 0.3~0.9m 짜리 물체가 잡혀 회피가 촉발됐고 차가
+        #   인도로 올라갔다. 그게 진짜 연석 위 물체인지 라이다 노이즈인지
+        #   크기만으로는 구분이 안 된다. 몇 점으로 이루어진 클러스터인지
+        #   (num_points) 알면 갈린다 - lidar_node 의 DBSCAN min_samples 가 5 다.
+        #   그런데 num_points·confidence·class_name 은 RecognizedObject 에만 있고
+        #   ObjectStatus(=/Object_topic)에는 없다. 어댑터가 옮길 자리가 없어서다.
+        self.f_raw = open(os.path.join(out_dir, 'percraw_%s.csv' % tag), 'w')
         self.w_obj = csv.writer(self.f_obj)
         self.w_odom = csv.writer(self.f_odom)
         self.w_gt = csv.writer(self.f_gt)
+        self.w_raw = csv.writer(self.f_raw)
         # list = 어느 목록으로 왔는가, type = 메시지의 type 필드.
         # 둘을 따로 남기는 이유: planning 은 목록으로 소비하는데(lattice 는
         # npc_list + obstacle_list) type 필드와 어긋나 있으면 그 자체가 발견이다.
@@ -114,6 +126,10 @@ class DiagPerception:
                              'heading_deg', 'vx_kmh', 'vy_kmh'])
         self.w_odom.writerow(['t', 'x', 'y', 'yaw_deg'])
         self.w_gt.writerow(['t', 'x', 'y', 'heading_deg'])
+        self.w_raw.writerow(['t', 'frame', 'uid', 'type', 'class_name',
+                             'x', 'y', 'z', 'sx', 'sy', 'sz', 'yaw_rad',
+                             'distance', 'num_points', 'confidence'])
+        self.raw_frame = 0
 
         self.frame = 0            # /Object_topic 을 받은 횟수 (0부터)
         self.dets = []            # 종료 요약용. 물체가 없는 프레임도 frame 은 증가한다
@@ -122,6 +138,8 @@ class DiagPerception:
         self.gt_checked = False
 
         rospy.Subscriber('/Object_topic', ObjectStatusList, self.obj_cb, queue_size=200)
+        rospy.Subscriber('/perception/recognized_objects_global', RecognizedObjectArray,
+                         self.raw_cb, queue_size=200)
         rospy.Subscriber('/odom', Odometry, self.odom_cb, queue_size=200)
         rospy.Subscriber('/ego_status', EgoVehicleStatus, self.ego_cb, queue_size=200)
         rospy.on_shutdown(self.finish)
@@ -134,6 +152,17 @@ class DiagPerception:
     def _stamp(msg):
         t = msg.header.stamp.to_sec()
         return t if t > 0.0 else rospy.Time.now().to_sec()
+
+    def raw_cb(self, msg):
+        t = self._stamp(msg)
+        for o in msg.objects:
+            self.w_raw.writerow([
+                '%.6f' % t, self.raw_frame, o.unique_id, o.type, o.class_name,
+                '%.3f' % o.center.x, '%.3f' % o.center.y, '%.3f' % o.center.z,
+                '%.3f' % o.size.x, '%.3f' % o.size.y, '%.3f' % o.size.z,
+                '%.4f' % o.yaw, '%.3f' % o.distance,
+                o.num_points, '%.3f' % o.confidence])
+        self.raw_frame += 1
 
     def obj_cb(self, msg):
         t = self._stamp(msg)
@@ -189,7 +218,7 @@ class DiagPerception:
         self.n_gt += 1
 
     def finish(self):
-        for f in (self.f_obj, self.f_odom, self.f_gt):
+        for f in (self.f_obj, self.f_odom, self.f_gt, self.f_raw):
             f.close()
 
         print('')

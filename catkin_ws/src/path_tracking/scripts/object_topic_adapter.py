@@ -2,7 +2,10 @@
 # -*- coding: utf-8 -*-
 """object_topic_adapter : 팀 perception 의 결과를 planning 의 /Object_topic 으로 옮긴다.
 
-  /perception/tracked_objects  ──>  [이 노드]  ──>  /Object_topic
+  /perception/tracked_objects           ─┐
+  (차·사람, 트래킹됨)                    ├─>  [이 노드]  ──>  /Object_topic
+  /perception/recognized_objects_global ─┘
+  (여기서 type=2 정적장애물만)
   (autonomous_driving)                              (morai_msgs)
 
 팀은 /Object_topic 을 만들지 않는다. object_fusion_node.py 머리말에
@@ -38,7 +41,8 @@ import rospy
 from autonomous_driving.msg import RecognizedObjectArray
 from morai_msgs.msg import ObjectStatusList
 
-from lib.object_convert import empty_object_status_list, to_object_status_list
+from lib.object_convert import (TYPE_STATIC_OBSTACLE, empty_object_status_list,
+                                to_object_status_list)
 
 
 class ObjectTopicAdapter:
@@ -48,11 +52,19 @@ class ObjectTopicAdapter:
 
         self.last_msg = None
         self.last_time = None
+        self.static_objs = []
+        self.static_time = None
         self.stale_warned = False
 
         self.pub = rospy.Publisher('/Object_topic', ObjectStatusList, queue_size=1)
         rospy.Subscriber('/perception/tracked_objects', RecognizedObjectArray,
                          self.cb, queue_size=1)
+        # 정적장애물(type=2)은 트래킹 대상이 아니라 여기로만 온다 - lib/object_convert.py
+        # merge_sources() 주석 참고. 두 토픽을 각각 받고 신선도도 따로 본다:
+        # tracking_node 만 죽고 global_transform 은 살아있는 경우가 있을 수 있어서,
+        # 한쪽이 끊겼다고 나머지까지 버리면 볼 수 있는 것을 못 보게 된다.
+        rospy.Subscriber('/perception/recognized_objects_global', RecognizedObjectArray,
+                         self.static_cb, queue_size=1)
         rospy.Timer(rospy.Duration(1.0 / rate_hz), self.tick)
 
         rospy.loginfo('[object_topic_adapter] start - %.1fHz, timeout %.2fs',
@@ -65,25 +77,41 @@ class ObjectTopicAdapter:
         self.last_msg = msg
         self.last_time = rospy.Time.now()
 
+    def static_cb(self, msg):
+        # 정적장애물만 고른다. 차/사람은 트래킹된 쪽(unique_id/velocity 가 채워진)을
+        # 써야 하므로 여기서 걸러내지 않으면 같은 물체가 두 번 실린다.
+        self.static_objs = [o for o in msg.objects if o.type == TYPE_STATIC_OBSTACLE]
+        self.static_time = rospy.Time.now()
+
+    def _fresh(self, stamp, now):
+        return stamp is not None and (now - stamp).to_sec() <= self.timeout
+
     def tick(self, _event):
         now = rospy.Time.now()
 
-        if self.last_msg is None:
-            # 아직 한 번도 못 받았다. 시작 직후의 정상 상태다 - 경고하지 않는다.
-            self.pub.publish(empty_object_status_list(now))
-            return
+        tracked_fresh = self._fresh(self.last_time, now)
+        static_fresh = self._fresh(self.static_time, now)
 
-        age = (now - self.last_time).to_sec()
-        if age > self.timeout:
+        if not tracked_fresh and not static_fresh:
+            if self.last_time is None and self.static_time is None:
+                # 아직 한 번도 못 받았다. 시작 직후의 정상 상태다 - 경고하지 않는다.
+                self.pub.publish(empty_object_status_list(now))
+                return
             if not self.stale_warned:
                 self.stale_warned = True
+                age = min(
+                    (now - t).to_sec()
+                    for t in (self.last_time, self.static_time) if t is not None)
                 # ROS 로그 포맷에 한글을 쓰면 컨테이너 로케일 때문에 깨진다
                 rospy.logwarn('[object_topic_adapter] perception stale %.2fs '
                               '- publishing empty list', age)
             self.pub.publish(empty_object_status_list(now))
             return
 
-        self.pub.publish(to_object_status_list(self.last_msg, now))
+        self.pub.publish(to_object_status_list(
+            self.last_msg if tracked_fresh else None,
+            now,
+            self.static_objs if static_fresh else None))
 
 
 if __name__ == '__main__':

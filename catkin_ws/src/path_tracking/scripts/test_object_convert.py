@@ -14,10 +14,24 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from autonomous_driving.msg import RecognizedObject, RecognizedObjectArray
-from lib.object_convert import empty_object_status_list, to_object_status_list
+from lib.object_convert import (MAX_STATIC_LENGTH_M, MAX_STATIC_WIDTH_M,
+                                empty_object_status_list, is_plausible_static,
+                                to_object_status_list)
 
 
-def make_obj(type_, x=1.0, y=2.0, yaw=0.0, vx=0.0, vy=0.0, uid=7, name='thing'):
+def make_sized(type_, length, width, dist=1.0, uid=7):
+    o = RecognizedObject()
+    o.type = type_
+    o.unique_id = uid
+    o.class_name = 'unknown'
+    o.center.x, o.center.y, o.center.z = 1.0, 2.0, 3.0
+    o.size.x, o.size.y, o.size.z = length, width, 1.5
+    o.distance = dist
+    return o
+
+
+def make_obj(type_, x=1.0, y=2.0, yaw=0.0, vx=0.0, vy=0.0, uid=7, name='thing',
+             dist=None):
     o = RecognizedObject()
     o.type = type_
     o.unique_id = uid
@@ -26,6 +40,8 @@ def make_obj(type_, x=1.0, y=2.0, yaw=0.0, vx=0.0, vy=0.0, uid=7, name='thing'):
     o.size.x, o.size.y, o.size.z = 4.0, 1.8, 1.5
     o.yaw = yaw
     o.velocity.x, o.velocity.y, o.velocity.z = vx, vy, 0.0
+    # merge_sources 가 distance 로 정렬한다. 안 주면 원점 거리로 채운다.
+    o.distance = math.hypot(x, y) if dist is None else dist
     return o
 
 
@@ -92,6 +108,75 @@ def main():
                 not e.obstacle_list and not e.npc_list and not e.pedestrian_list)
     ok &= check('빈 목록은 개수도 0',
                 e.num_of_obstacle == 0 and e.num_of_npcs == 0 and e.num_of_pedestrian == 0)
+
+    # ---- 정적장애물 통로 (2026-09-03 추가) ----
+
+    # 10) static_objs 를 주면 obstacle_list 에 합쳐진다
+    out = to_object_status_list(wrap([make_obj(1)]), None,
+                                static_objs=[make_obj(2), make_obj(2)])
+    ok &= check('tracked 차 1 + static 2 -> npc 1, obstacle 2',
+                len(out.npc_list) == 1 and len(out.obstacle_list) == 2)
+
+    # 11) static_objs 를 안 주면 예전과 똑같이 동작한다 (회귀 방지)
+    out = to_object_status_list(wrap([make_obj(1)]), None)
+    ok &= check('static 없으면 obstacle 0', not out.obstacle_list)
+
+    # 12) tracked 가 None 이어도 (tracking_node 만 죽은 경우) 정적물은 나간다
+    out = to_object_status_list(None, None, static_objs=[make_obj(2)])
+    ok &= check('tracked=None 이어도 정적물은 발행된다', len(out.obstacle_list) == 1)
+
+    # 13) ★ 정적물이 많아도 차/사람이 밀려나지 않는다
+    #     거리순으로만 20개를 자르면 가까운 정적물 조각이 자리를 다 먹는다.
+    many_static = [make_obj(2, dist=1.0, uid=100 + i) for i in range(30)]
+    far_car = make_obj(1, dist=50.0, uid=1)
+    out = to_object_status_list(wrap([far_car]), None, static_objs=many_static)
+    ok &= check('먼 차가 가까운 정적물 30개에 밀려나지 않는다', len(out.npc_list) == 1)
+    ok &= check('전체는 20개를 넘지 않는다',
+                len(out.npc_list) + len(out.obstacle_list) + len(out.pedestrian_list) <= 20)
+
+    # ---- 정적물 크기 상한 (2026-09-03 추가) ----
+    #
+    # DBSCAN 이 가드레일/터널벽을 통째로 묶어 최대 67m 짜리 물체가 나왔고,
+    # 그게 ACC 통로 안으로 판정돼 차가 여러 번 섰다. 6.5 x 2.8 을 넘는 덩어리는
+    # 개별 물체가 아니라 구조물이라 버린다.
+
+    # 14) 정상 크기는 통과
+    ok &= check('차 크기(4.5x1.9) 는 통과', is_plausible_static(make_sized(2, 4.5, 1.9)))
+    ok &= check('라바콘 크기(0.4x0.4) 는 통과', is_plausible_static(make_sized(2, 0.4, 0.4)))
+
+    # 15) 실측에서 차를 세운 크기들은 배제
+    ok &= check('16.5x2.11 (경로 791m 에서 세운 것) 배제',
+                not is_plausible_static(make_sized(2, 16.5, 2.11)))
+    ok &= check('13.13x1.59 (경로 773m) 배제',
+                not is_plausible_static(make_sized(2, 13.13, 1.59)))
+    ok &= check('67.09x1.0 (최대값) 배제',
+                not is_plausible_static(make_sized(2, 67.09, 1.0)))
+
+    # 16) 경계값
+    ok &= check('길이 6.5 는 통과(경계 포함)', is_plausible_static(make_sized(2, 6.5, 1.0)))
+    ok &= check('길이 6.51 은 배제', not is_plausible_static(make_sized(2, 6.51, 1.0)))
+    ok &= check('폭 2.8 은 통과(경계 포함)', is_plausible_static(make_sized(2, 4.0, 2.8)))
+    ok &= check('폭 2.81 은 배제', not is_plausible_static(make_sized(2, 4.0, 2.81)))
+
+    # 17) 축이 바뀌어 와도 같은 답 (인지가 x/y 를 뒤집어 줄 때가 있다)
+    ok &= check('축이 뒤집혀도(2.11x16.5) 배제',
+                not is_plausible_static(make_sized(2, 2.11, 16.5)))
+
+    # 18) 실제 변환 경로에서 걸러지는가
+    out = to_object_status_list(
+        wrap([]), None,
+        static_objs=[make_sized(2, 4.5, 1.9), make_sized(2, 16.5, 2.11)])
+    ok &= check('큰 덩어리는 /Object_topic 에 안 실린다', len(out.obstacle_list) == 1)
+
+    # 19) 차/사람은 크기 검사를 안 받는다 (tracking_node 가 이미 걸렀다)
+    big_car = make_obj(1)
+    big_car.size.x, big_car.size.y = 16.5, 2.11
+    out = to_object_status_list(wrap([big_car]), None)
+    ok &= check('tracked 는 크기로 안 걸른다', len(out.npc_list) == 1)
+
+    # 20) 임계값 자체를 못 박아둔다 (팀 tracking_node.py 와 같은 값이어야 한다)
+    ok &= check('임계 6.5 / 2.8',
+                MAX_STATIC_LENGTH_M == 6.5 and MAX_STATIC_WIDTH_M == 2.8)
 
     print('')
     print('결과: ' + ('전부 통과' if ok else '실패 있음'))
