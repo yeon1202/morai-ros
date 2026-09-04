@@ -242,6 +242,12 @@ if(TARGET acc_core_test)
   target_link_libraries(acc_core_test ${catkin_LIBRARIES} gtest_main)
 endif()
 
+## gtest: 도로 경계(옆 차로 유무) 순수 로직 단위 테스트
+catkin_add_gtest(road_core_test test/road_core_test.cpp)
+if(TARGET road_core_test)
+  target_link_libraries(road_core_test ${catkin_LIBRARIES} gtest_main)
+endif()
+
 ## gtest: behavior FSM 순수 로직 단위 테스트
 catkin_add_gtest(behavior_core_test test/behavior_core_test.cpp)
 if(TARGET behavior_core_test)

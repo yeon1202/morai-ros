@@ -20,6 +20,10 @@
 
 // "제한 없음" 약속값(1e6)을 behavior 쪽과 공유한다. 두 곳에 따로 적으면 어긋난다.
 #include "path_tracking/behavior_core.hpp"
+#include "path_tracking/acc_core.hpp"   // lateralHalfExtent - ACC 와 같은 판정식을 쓰기 위해
+#include "path_tracking/road_core.hpp"  // 옆 차로 유무 - 도로 밖 후보를 거른다
+#include <ros/package.h>
+#include <string>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -43,6 +47,26 @@ public:
   LatticePlanner()
   {
     ros::NodeHandle nh;
+    ros::NodeHandle pnh("~");
+
+    // 도로 경계표를 읽는다. build_lane_table.py 가 미리 만들어 둔 것이다.
+    //
+    // ⚠️ 못 읽으면 "옆 차로가 없다" 로 답하게 되어 회피가 통째로 꺼진다.
+    //    조용히 넘어가면 안 되는 상태라 ERROR 로 남긴다. 이 선택의 근거는
+    //    road_core.hpp 의 at() 주석 참고 - 모를 때 나가면 도로 밖이고,
+    //    모를 때 안 나가면 ACC 가 속도를 줄인다. 두 실패의 무게가 다르다.
+    std::string lane_csv;
+    pnh.param<std::string>("lane_table",
+                           lane_csv,
+                           ros::package::getPath("path_tracking") + "/map/lane_table.csv");
+    if (lane_table_.load(lane_csv)) {
+      ROS_INFO("[lattice] lane_table %zu points (%s)", lane_table_.size(), lane_csv.c_str());
+    } else {
+      ROS_ERROR("[lattice] cannot read lane_table: %s", lane_csv.c_str());
+      ROS_ERROR("[lattice] every side offset will be rejected - avoidance is OFF");
+      ROS_ERROR("[lattice] build it with: rosrun path_tracking build_lane_table.py");
+    }
+
     sub_path_ = nh.subscribe("/local_path", 1, &LatticePlanner::pathCb, this);
     sub_ego_  = nh.subscribe("/ego_status", 1, &LatticePlanner::egoCb, this);
     sub_odom_ = nh.subscribe("/odom", 1, &LatticePlanner::odomCb, this);
@@ -241,7 +265,36 @@ private:
   void objCb(const morai_msgs::ObjectStatusList::ConstPtr& m) { objs_ = *m; has_obj_ = true; }
 
   // 장애물 하나 = 위치 + 반경(size 반영)
-  struct Obs { double x, y, r; };
+  // 물체 하나. r 은 예전 원 근사(크기를 모를 때 폴백), len/wid/yaw 가 방향 있는 상자.
+  // 2026-09-03: 원 근사가 가드레일의 길이를 옆으로 부풀려 경로 밖 물체가 전역경로를
+  // 막던 문제 때문에 상자를 추가했다. 판정식은 acc_core.hpp 의 lateralHalfExtent
+  // 하나만 쓴다 - ACC 와 다른 기준을 쓰면 "lattice 는 통과시키는데 ACC 는 세우는"
+  // 일이 또 생긴다.
+  // 도로 경계표. 후보가 지나갈 구간에 옆 차로가 있는지 본다.
+  // 2026-09-03 실패: 오탐으로 우측 -3.51 을 골랐는데 12m 앞에서 우측 차로가
+  // 끝나 인도로 올라갔다. 전역경로의 75% 가 우측 차로 없는 구간이다.
+  road::LaneTable lane_table_;
+  // 후보별 "도로 안인가". generateCandidates 가 채우고 selectLane 이 쓴다.
+  std::vector<char> cand_allowed_;
+
+  struct Obs { double x, y, r, len, wid, yaw; };
+
+  // 경로점 i 에서의 경로 진행방향 [rad]. 물체 방향과의 각도차를 내는 데 쓴다.
+  static double pathYawAt(const nav_msgs::Path& path, std::size_t i)
+  {
+    if (path.poses.size() < 2) return 0.0;
+    std::size_t a = (i == 0) ? 0 : i - 1;
+    std::size_t b = std::min(i + 1, path.poses.size() - 1);
+    return std::atan2(path.poses[b].pose.position.y - path.poses[a].pose.position.y,
+                      path.poses[b].pose.position.x - path.poses[a].pose.position.x);
+  }
+
+  // 물체가 이 경로점 방향 기준으로 차지하는 횡 반폭.
+  static double halfExtent(const Obs& o, double path_yaw)
+  {
+    if (o.len <= 0.0 && o.wid <= 0.0) return o.r;
+    return acc::lateralHalfExtent(o.len, o.wid, o.yaw - path_yaw);
+  }
 
   // 장애물 수집.
   //
@@ -260,7 +313,9 @@ private:
       for (const auto& o : list) {
         double r = 0.5 * std::max(o.size.x, o.size.y);   // size 반영 (리뷰 #4)
         if (r < 0.3) r = 0.3;
-        v.push_back({o.position.x, o.position.y, r});
+        // size 규약: x=length(주축), y=width(부축). heading 은 도 단위.
+        v.push_back({o.position.x, o.position.y, r,
+                     o.size.x, o.size.y, o.heading * M_PI / 180.0});
       }
     };
     add(objs_.npc_list);
@@ -332,9 +387,10 @@ private:
     Span sp;
     auto blocked = [&](std::size_t i) {
       const auto& p = local_path_.poses[i];
+      const double pyaw = pathYawAt(local_path_, i);
       for (const auto& o : obs) {
         double d = std::hypot(p.pose.position.x - o.x, p.pose.position.y - o.y);
-        if (d < o.r + CAR_HALF_WIDTH + SAFE_MARGIN) return true;
+        if (d < halfExtent(o, pyaw) + CAR_HALF_WIDTH + SAFE_MARGIN) return true;
       }
       return false;
     };
@@ -402,6 +458,7 @@ private:
                                    MIN_TRANSITION);
 
     cand_accel_.clear();
+    cand_allowed_.clear();
     cand_accel_limit_ = a_lat;
 
     for (double off : LANE_OFFSET) {
@@ -411,6 +468,7 @@ private:
       // 후보마다 정확히 하나. 중간에 continue 로 빠져도 인덱스가 어긋나지 않도록
       // 먼저 자리를 잡아두고 나중에 채운다.
       cand_accel_.push_back(0.0);
+      cand_allowed_.push_back(1);
 
       // ① 이 후보가 실제로 필요한 전이 길이.
       //
@@ -503,6 +561,54 @@ private:
       if (i_end < i_start + 2) { out.push_back(cand); continue; }  // 남은 경로가 짧다
       int i_hold = i_end;
       while (i_hold + 1 < n && cum[i_hold] < hold_end) ++i_hold;
+
+      // ③ 도로 경계 게이트 (2026-09-03)
+      //
+      // 이 후보가 옆으로 나가 있는 구간 [i_start, i_hold] 전체에서 그쪽 차로가
+      // 실제로 존재하는지 본다. 하나라도 없으면 후보를 버린다.
+      //
+      // ⚠️ 자차 위치 하나만 보면 안 된다. 실패 당시 회피 시작점(경로 417.8m)의
+      //    링크는 can_move_right_lane=True 였는데, 12m 앞 429.9m 에서 링크가
+      //    바뀌며 False 가 됐다. 차는 그 사이에 인도로 올라갔다.
+      //
+      // 좌표로 조회하는 이유: local_path_ 는 전역경로에서 잘린 조각이라 자기가
+      // 전역경로의 몇 번 점인지 모른다. 표가 좌표를 들고 있어서 그걸로 찾는다.
+      //
+      // 실패 세 가지를 구분한다. 셋을 뭉뚱그리면 원인을 못 찾는다.
+      //   (a) 표를 못 읽었다        -> 옆으로 못 나간다 (보수적). 생성자가 ERROR 를 냈다.
+      //   (b) 표는 있는데 코스 밖이다 -> 게이트가 답할 말이 없다. 통과시키되 WARN.
+      //   (c) 정상 조회             -> 표대로 판정.
+      // 차로 안에서 비켜가는 수준(|offset| <= kNudgeMax)은 게이트 대상이 아니다.
+      // 옆 차로가 없어도 해야 한다 - 안 그러면 편도 1차선 구간의 정적장애물 앞에서
+      // 그냥 선다(2026-09-03 실측). 자세한 근거는 road_core.hpp kNudgeMax 주석.
+      if (a_off > 1e-9 && !road::isNudge(off)) {
+        if (!lane_table_.loaded()) {
+          cand_allowed_.back() = 0;
+          out.push_back(cand);
+          continue;
+        }
+        const auto& p0 = local_path_.poses[i_start].pose.position;
+        const auto& p1 = local_path_.poses[std::min(i_hold, n - 1)].pose.position;
+        const std::size_t g0 = lane_table_.nearestIndex(p0.x, p0.y);
+        const std::size_t g1 = lane_table_.nearestIndex(p1.x, p1.y);
+
+        if (g0 == road::kNoIndex || g1 == road::kNoIndex) {
+          // 전역경로에서 3m 넘게 떨어져 있다. 오프라인 테스트의 가짜 경로이거나,
+          // 실주행이라면 위치추정이 크게 틀어진 것이다. 후자라면 lattice 의 전제
+          // (local_path 가 전역경로의 조각이다) 자체가 깨진 상태라 게이트만의
+          // 문제가 아니다. 조용히 회피를 끄면 원인을 못 찾으므로 경고를 낸다.
+          ROS_WARN_THROTTLE(5.0,
+              "[lattice] local_path is >3m off the global path "
+              "- road boundary gate not applied");
+        } else if (!road::offsetAllowed(lane_table_, off, g0, g1)) {
+          cand_allowed_.back() = 0;
+          ROS_INFO_THROTTLE(2.0,
+              "[lattice] offset %+.2f m is off-road - candidate rejected (wp %zu~%zu)",
+              off, g0, g1);
+          out.push_back(cand);   // 자리는 지킨다 (인덱스 정렬)
+          continue;
+        }
+      }
 
       // 기동 전 구간은 기준경로를 그대로 붙인다. 회피할 이유가 없을 때 raw
       // local_path 를 내보내는 것과 같은 상태이므로 새로 만들 것이 없다.
@@ -627,6 +733,17 @@ private:
     blocked.assign(cands.size(), false);
 
     for (size_t i = 0; i < cands.size(); ++i) {
+      // 도로 밖 후보는 충돌과 같은 무게로 막는다.
+      //
+      // 벌점만 주고 넘어가면 안 된다. 도로 밖 후보는 generateCandidates 가
+      // 점을 하나도 안 넣고 반환하는데, 그러면 아래 충돌 검사가 "부딪히는 점이
+      // 없다" 로 통과시켜 버린다. 기준경로(비용 0)가 막혔을 때 비용 1~4 짜리
+      // 빈 후보가 최소값이 되어 뽑히고, lattice 가 빈 경로를 발행하게 된다.
+      if (i < cand_allowed_.size() && !cand_allowed_[i]) {
+        weight[i] += COLLISION_PENALTY;
+        blocked[i] = true;
+        continue;
+      }
       // 벌점은 후보당 한 번만 준다.
       //
       // 예전에는 break 가 안쪽(장애물) 루프만 끊고 바깥(점) 루프는 계속 돌아서,
@@ -635,10 +752,23 @@ private:
       // 충돌하느냐" 로 순위가 매겨지고, 중앙선 회피 같은 기본 비용(20)이
       // 수백 점의 벌점 앞에서 무의미해진다.
       bool hit = false;
-      for (const auto& p : cands[i].poses) {
+      for (std::size_t k = 0; k < cands[i].poses.size(); ++k) {
+        const auto& p = cands[i].poses[k];
+        // ⚠️ 각도는 "기준경로" 방향으로 잰다. 후보 자신의 방향이 아니다.
+        //
+        // 후보의 방향을 쓰면 회피 전이 구간에서 후보가 기울어 있는 만큼 물체의
+        // 횡 반폭이 커진다. 정사각형에 가까운 물체는 45도에서 대각선(=반폭 1.41배)
+        // 이 걸려, 회피를 시작하는 순간 갑자기 더 넓은 회피가 필요해지는 되먹임이
+        // 생긴다(test_lattice 의 '미션 장애물 13m' 가 -3.0 -> -3.51 로 밀렸다).
+        //
+        // 더 중요한 이유: blockedSpan 과 acc_core 도 기준경로로 잰다. 세 곳이
+        // 같은 물체를 같은 기준으로 봐야 "lattice 는 통과시키는데 ACC 는 세우는"
+        // 2026-09-02 같은 불일치가 안 생긴다.
+        const double pyaw = pathYawAt(local_path_,
+                                      std::min(k, local_path_.poses.size() - 1));
         for (const auto& o : obs) {
           double d = std::hypot(p.pose.position.x - o.x, p.pose.position.y - o.y);
-          if (d < o.r + CAR_HALF_WIDTH + SAFE_MARGIN) {  // size 반영 충돌
+          if (d < halfExtent(o, pyaw) + CAR_HALF_WIDTH + SAFE_MARGIN) {  // 상자 판정
             hit = true;
             break;
           }
