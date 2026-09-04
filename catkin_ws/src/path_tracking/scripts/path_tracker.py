@@ -25,6 +25,7 @@ from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Float64
 
 from lib.point import Point
+from lib.pkg_paths import global_path_csv
 from lib.vehicle_state import VehicleState
 from lib.path_manager import PathManager
 from lib.pure_pursuit import PurePursuit
@@ -65,7 +66,7 @@ LOCAL_PATH_SIZE  = 140      # 앞으로 볼 waypoint 개수 (약 0.6m 간격 →
                             #     제동거리  = v^2/2a = 46m (감속 3m/s^2)
                             #     반응 여유 = 4초 * 16.67 = 67m
                             #   → 84m. lattice 는 자체 end_idx 로 앞 30m 만 쓰므로 영향 없음.
-IS_CLOSED_PATH   = False    # 경로가 안 닫혀있음(시작≠끝). 폐곡선 코스로 다시 따면 True
+IS_CLOSED_PATH   = True    # 경로가 안 닫혀있음(시작≠끝). 폐곡선 코스로 다시 따면 True
 MAX_STEER        = 0.65     # 안전 클램프 [rad] (약 37도) - 큰 조향각 튐 방지
                             #   0.5 -> 0.65. 0.5(28.6도)는 우리가 스스로 채운 족쇄였다.
                             #   diag_steer.py 실측: 명령한 각이 그대로 실제 조향각이 되고
@@ -97,13 +98,11 @@ MAX_CTE          = 6.0      # 경로 이탈 한계 [m]. 넘으면 정지.
 
 class PathTracker:
     def __init__(self):
-        # 1) path.csv 로드
-        pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        # 스무딩된 경로(path_smooth.csv)가 있으면 그걸 우선 사용
-        smooth_path = os.path.join(pkg_dir, 'path', 'path_smooth.csv')
-        raw_path = os.path.join(pkg_dir, 'path', 'path.csv')
-        csv_path = smooth_path if os.path.exists(smooth_path) else raw_path
-        rospy.loginfo('[path_tracker] 경로 파일: %s', os.path.basename(csv_path))
+        # 1) 전역경로 로드.
+        #    파일 위치는 lib/pkg_paths 가 package.xml 을 찾아 올라가서 정한다
+        #    (개발용과 팀 repo 의 폴더 깊이가 달라서 dirname 횟수를 세면 틀린다).
+        csv_path = global_path_csv(__file__)
+        rospy.loginfo('[path_tracker] 경로 파일: %s', csv_path)
         self.path = self._load_path(csv_path)
         if len(self.path) < LOCAL_PATH_SIZE:
             rospy.logwarn('waypoint가 %d개뿐. LOCAL_PATH_SIZE보다 적음', len(self.path))
@@ -130,7 +129,23 @@ class PathTracker:
         self.lattice_stamp = None
         self.acc_velocity = None         # ACC가 준 목표속도 [m/s]
         self.acc_stamp = None
-        self.cmd_pub   = rospy.Publisher('/ctrl_cmd', CtrlCmd, queue_size=1)
+
+        # 제어 출력을 낼지 (기본 켬). 팀 vehicle_control 을 쓸 때 false 로 둔다.
+        #   rosrun  : _control:=false
+        #   launch  : <param name="control" value="false"/>
+        #
+        # ⚠️ 노드 자체를 끄면 안 된다. 이 노드는 제어기이기 전에 경로 공급원이다
+        #    (/global_path, /local_path -> lattice_planner). 끄면 회피가 통째로
+        #    멈춘다. 그래서 노드는 살리고 제어 출력만 끄는 스위치를 둔다.
+        #
+        # ⚠️ 제어기 둘이 동시에 /ctrl_cmd 를 내면 서로 덮어쓰는데 양쪽 로그는
+        #    정상으로 보인다. 반드시 한쪽만 켤 것.
+        self.control_enabled = rospy.get_param('~control', True)
+        if not self.control_enabled:
+            rospy.loginfo('[path_tracker] 제어 출력 꺼짐 - 경로 공급만 한다 '
+                          '(/ctrl_cmd 는 다른 제어기 몫)')
+        self.cmd_pub = (rospy.Publisher('/ctrl_cmd', CtrlCmd, queue_size=1)
+                        if self.control_enabled else None)
         self.gpath_pub = rospy.Publisher('/global_path', Path, queue_size=1, latch=True)
         self.lpath_pub = rospy.Publisher('/local_path', Path, queue_size=1)
         rospy.Subscriber('/lattice_path', Path, self.lattice_callback)
@@ -160,6 +175,9 @@ class PathTracker:
         if self._braked:
             return
         self._braked = True
+        if self.cmd_pub is None:
+            rospy.loginfo('[path_tracker] 종료 - 제어 출력이 꺼져 있어 제동은 건너뛴다')
+            return
         rospy.logwarn('[path_tracker] 종료 - 제동 명령 전송')
         for _ in range(30):          # 1.5초간 반복 전송 (UDP 유실 대비)
             try:
@@ -277,6 +295,9 @@ class PathTracker:
         else:
             accel, brake = 0.0, min(1.0, BRAKE_BASE + BRAKE_GAIN * (-err))
 
+        if self.cmd_pub is None:
+            return                        # 제어 출력 꺼짐 (경로 공급만 한다)
+
         cmd = CtrlCmd()
         cmd.longlCmdType = 1
         cmd.accel = accel
@@ -311,6 +332,8 @@ class PathTracker:
         return fallback
 
     def _publish_stop(self):
+        if self.cmd_pub is None:
+            return                        # 제어 출력 꺼짐 - 정지도 다른 제어기 몫
         cmd = CtrlCmd()
         cmd.longlCmdType = 1
         cmd.accel = 0.0

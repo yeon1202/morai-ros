@@ -113,7 +113,13 @@ say "1단계 · 팀 구조로 재배치 (임시 폴더에서 만든다)"
 # ─────────────────────────────────────────────────────────────────────
 # 임시 폴더에서 먼저 완성한 뒤 검사를 통과해야 진짜로 옮긴다.
 # 실패해도 팀 repo 는 손상되지 않는다.
-EXCL=(--exclude='*.bak' --exclude='__pycache__' --exclude='*.pyc')
+# path_smooth_closed.csv 는 제외한다.
+#   팀 repo 에서 이 파일의 자리는 autonomous_driving/path/ 이고 이미 거기 있다.
+#   여기서 같이 옮기면 src/planning/path/ 에 아무도 안 읽는 사본이 하나 더 생기고,
+#   둘이 갈라지면 어느 쪽이 진짜인지 알 수 없게 된다.
+#   (path_tracker 는 package.xml 을 찾아 올라가므로 양쪽에서 각자 제자리를 읽는다)
+EXCL=(--exclude='*.bak' --exclude='__pycache__' --exclude='*.pyc'
+      --exclude='path_smooth_closed.csv')
 
 mkdir -p "$STAGE/planning/include/planning" "$STAGE/map"
 rsync -a "${EXCL[@]}" "$DEV/scripts" "$DEV/launch" "$DEV/path" "$DEV/test" "$STAGE/planning/"

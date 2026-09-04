@@ -26,7 +26,7 @@
   <arg name="controller" default="internal"/>
   <arg name="waypoint_csv"
        default="$(find autonomous_driving)/path/path_smooth_closed.csv"/>
-  <arg name="max_speed_kph" default="40.0"/>
+  <arg name="max_speed_kph" default="10.0"/>
   <arg name="control_log"   default="$(env HOME)/catkin_ws/logs/vehicle_control.csv"/>
 
   <!-- 경로 공급 + (internal 일 때) 제어 -->
@@ -35,9 +35,14 @@
 
   <node unless="$(eval arg('controller') == 'internal')"
         pkg="path_tracking" type="path_tracker.py" name="path_tracker" output="screen">
-    <!-- 제어 출력만 죽인다. /global_path /local_path 는 그대로 나간다.
-         버리지 않고 남겨두는 이유: 두 제어기의 명령을 나란히 비교할 수 있다. -->
-    <remap from="/ctrl_cmd" to="/ctrl_cmd_path_tracker"/>
+    <!-- 제어 출력만 끈다. /global_path /local_path 는 그대로 나간다.
+         (2026-09-04: remap 으로 /ctrl_cmd 를 딴 데로 돌리던 것을 파라미터로 바꿨다.
+          remap 은 계산해서 아무도 안 듣는 토픽에 계속 쏘는 것이고, rostopic 으로
+          보면 발행자가 있는 것처럼 보여 헷갈린다. 지금은 퍼블리셔를 아예 안 만든다.)
+
+         ※ 두 제어기의 명령을 나란히 비교하고 싶으면 이 param 을 빼고
+           <remap from="/ctrl_cmd" to="/ctrl_cmd_path_tracker"/> 를 쓰면 된다. -->
+    <param name="control" value="false"/>
   </node>
 
   <!-- external 일 때만 뜨는 팀 제어기 -->
@@ -89,7 +94,7 @@
        끄면(acc:=false) path_tracker 가 자체 TARGET_SPEED_KMH(20) 로 정속 주행한다.
        켜면 크루즈 55 + 곡률 감속 + 앞차 추종이 살아난다. -->
   <arg name="acc"               default="true"/>
-  <arg name="cruise_speed_kmh"  default="55.0"/>
+  <arg name="cruise_speed_kmh"  default="25.0"/>
   <arg name="lookahead"         default="60.0"/>
   <arg name="accel_rate_limit"  default="1.0"/>
   <node if="$(arg acc)" pkg="path_tracking" type="acc_planner" name="acc_planner" output="screen">
