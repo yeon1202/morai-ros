@@ -38,6 +38,11 @@ from sensor_msgs.msg import Imu, CompressedImage, PointCloud2, PointField
 from geometry_msgs.msg import Vector3, Quaternion
 from std_msgs.msg import Header, String
 
+# ⚠️ 이 값은 PC 마다 다르다. MORAI 시뮬이 도는 머신의 주소를 넣는다.
+#   같은 머신(도커 host 네트워크)  -> 127.0.0.1
+#   시뮬이 별도 VM/PC             -> 그 머신의 주소 (예: 192.168.56.101)
+#   woonggook 브랜치는 192.168.56.101 이고 여기는 127.0.0.1 이라 머지 때마다
+#   충돌한다. 코드가 틀린 게 아니라 환경 차이다.
 DEST_IP = "127.0.0.1"
 CTRL_CMD_PORT = 9093          # MORAI Network Settings의 Host PORT랑 일치해야 함
 # 9109 = Competition Vehicle Status (대회 규정 허용 채널). position 이 0,0,0 으로 온다.
