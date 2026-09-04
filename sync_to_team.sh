@@ -12,6 +12,10 @@
 #       scripts/ path/ launch/ test/   ->     src/planning/ 아래 그대로
 #       map/                           ->     map/            (패키지 루트로)
 #
+#   여기에 더해, 팀 코드 자리(autonomous_driving/)에 있지만 planning 이 만들어
+#   유지하는 파일 몇 개도 같이 옮긴다 (아래 AD_FILES). 이건 폴더 통째가 아니라
+#   목록에 적힌 파일만 옮긴다 - 그 폴더에는 남의 코드가 같이 있기 때문이다.
+#
 #   팀 repo 는 path_tracking 을 별도 패키지가 아니라 autonomous_driving 안으로
 #   병합해서 쓴다. catkin 은 package.xml 을 찾은 디렉터리 아래로 더 안 내려가서,
 #   패키지 안에 패키지를 중첩하면 에러도 없이 조용히 무시되기 때문이다.
@@ -40,13 +44,24 @@ AD=$TEAM/autonomous_driving
 DST_PLANNING=$AD/src/planning
 DST_MAP=$AD/map
 
+# 팀 코드 자리(autonomous_driving/)에 있지만 planning 이 직접 만들어 유지하는 파일.
+#
+# ⚠️ 폴더를 통째로 rsync 하면 안 된다. 그 폴더에는 인지/제어/localization 팀
+#    코드가 같이 들어 있고, 우리 로컬 사본은 그것들이 오래된 상태일 수 있다.
+#    그래서 여기 적은 파일만 하나씩 옮긴다. 새로 생기면 이 목록에 추가할 것.
+DEV_AD=${DEV_AD:-$(dirname "$DEV")/autonomous_driving}
+AD_FILES=(
+  launch/perception.launch
+  scripts/run_camera_detection_39.sh
+)
+
 APPLY=0
 BUILD=1
 for a in "$@"; do
   case "$a" in
     --apply)    APPLY=1 ;;
     --no-build) BUILD=0 ;;
-    -h|--help)  sed -n '3,32p' "$0"; exit 0 ;;
+    -h|--help)  sed -n '3,35p' "$0"; exit 0 ;;
     *) echo "모르는 옵션: $a  (--apply / --no-build / --help)"; exit 2 ;;
   esac
 done
@@ -80,6 +95,15 @@ if git -C "$TEAM" rev-parse --git-dir >/dev/null 2>&1; then
   fi
   DIRTY=$(git -C "$TEAM" status --porcelain -- autonomous_driving/src/planning autonomous_driving/map | wc -l)
   [ "$DIRTY" -gt 0 ] && echo "  참고: 커밋 안 된 변경 $DIRTY 건이 이미 있다"
+
+  # 아래 파일들은 팀 코드 자리에 있어서 원래 작성자가 따로 있을 수 있다.
+  # 매번 경고를 띄우면 진짜 경고를 무시하게 되므로, 누가 마지막으로 건드렸는지만
+  # 보여주고 판단은 사람이 한다.
+  echo "  팀 자리 파일(autonomous_driving/) 최근 이력:"
+  for f in "${AD_FILES[@]}"; do
+    LAST=$(git -C "$TEAM" log -1 --format='%an %ad %s' --date=short -- "autonomous_driving/$f" 2>/dev/null || true)
+    printf '    %-34s %s\n' "$f" "${LAST:-(팀 repo 에 아직 없음)}"
+  done
 else
   echo "  (팀 폴더가 git repo 가 아니라 건너뜀)"
 fi
@@ -96,7 +120,18 @@ rsync -a "${EXCL[@]}" "$DEV/scripts" "$DEV/launch" "$DEV/path" "$DEV/test" "$STA
 rsync -a "${EXCL[@]}" "$DEV/src/"                    "$STAGE/planning/"          # .cpp 를 한 층 위로
 rsync -a "${EXCL[@]}" "$DEV/include/path_tracking/"  "$STAGE/planning/include/planning/"
 rsync -a "${EXCL[@]}" "$DEV/map/"                    "$STAGE/map/"
-echo "  파일 $(find "$STAGE" -type f | wc -l)개 배치"
+
+# 팀 코드 자리 파일. 경로 구조를 그대로 유지한다(패키지 이름이 양쪽 같아서
+# 2단계 치환이 필요 없다 - autonomous_driving 은 이미 팀 이름이다).
+for f in "${AD_FILES[@]}"; do
+  if [ ! -f "$DEV_AD/$f" ]; then
+    die "목록에 있는데 개발용에 없다: $DEV_AD/$f
+     (AD_FILES 에서 빼거나 파일을 되살릴 것)"
+  fi
+  mkdir -p "$STAGE/ad/$(dirname "$f")"
+  cp -p "$DEV_AD/$f" "$STAGE/ad/$f"
+done
+echo "  파일 $(find "$STAGE" -type f | wc -l)개 배치 (팀 자리 ${#AD_FILES[@]}개 포함)"
 
 # ─────────────────────────────────────────────────────────────────────
 say "2단계 · 파일 안의 이름 고치기"
@@ -131,6 +166,16 @@ if LEFT=$(grep -rn "path_tracking" "$STAGE" 2>/dev/null); then
 fi
 echo "  OK · path_tracking 이라는 이름이 남은 곳 없음"
 
+# launch 파일이 XML 로 성립하는지 본다. 태그 하나 잘못 닫으면 roslaunch 가 통째로
+# 안 뜨는데, catkin 은 launch 를 쳐다보지 않으므로 5단계 빌드 검사에도 안 걸린다.
+BAD=""
+while IFS= read -r f; do
+  python3 -c 'import sys,xml.etree.ElementTree as E; E.parse(sys.argv[1])' "$f" 2>/dev/null \
+    || BAD="$BAD ${f#$STAGE/}"
+done < <(find "$STAGE" -name '*.launch')
+[ -n "$BAD" ] && die "launch XML 이 깨졌다:$BAD"
+echo "  OK · launch XML $(find "$STAGE" -name '*.launch' | wc -l)개 정상"
+
 # ─────────────────────────────────────────────────────────────────────
 say "3단계 · 검사 ② 빌드 목록이 맞나"
 # ─────────────────────────────────────────────────────────────────────
@@ -158,9 +203,13 @@ say "4단계 · 바뀌는 내용"
 #   자리라서, 나중에 팀이 자기 지도 파일을 넣었을 때 그걸 지워버리면 안 된다.
 SYNC_PLANNING=(rsync -a --delete --exclude='.gitkeep' "$STAGE/planning/" "$DST_PLANNING/")
 SYNC_MAP=(rsync -a "$STAGE/map/" "$DST_MAP/")
+#   팀 자리 파일도 --delete 를 쓰지 않는다. autonomous_driving/launch 와 scripts 에는
+#   팀원 파일이 같이 있어서, 우리 목록에 없다고 지우면 남의 것을 지운다.
+SYNC_AD=(rsync -a "$STAGE/ad/" "$AD/")
 
 "${SYNC_PLANNING[@]}" --dry-run --itemize-changes | grep -v '^\.' | sed 's/^/  planning  /' || true
 "${SYNC_MAP[@]}"      --dry-run --itemize-changes | grep -v '^\.' | sed 's/^/  map       /' || true
+"${SYNC_AD[@]}"       --dry-run --itemize-changes | grep -v '^\.' | sed 's/^/  팀자리    /' || true
 echo "  (윗줄이 없으면 바뀌는 게 없다는 뜻)"
 
 # ─────────────────────────────────────────────────────────────────────
@@ -216,6 +265,7 @@ if [ "$APPLY" = 1 ]; then
   say "6단계 · 팀 repo 에 반영"
   "${SYNC_PLANNING[@]}"
   "${SYNC_MAP[@]}"
+  "${SYNC_AD[@]}"
   echo "  완료. git status 로 확인하고 커밋할 것:"
   echo "    cd $TEAM && git status"
 else
