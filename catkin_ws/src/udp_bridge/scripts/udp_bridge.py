@@ -11,6 +11,7 @@ MORAI와는 UDP로, 우리 컨트롤러/인지 노드들과는 ROS 토픽으로 
   /camera1/image_jpeg/compressed  (sensor_msgs/CompressedImage)
   /camera2/image_jpeg/compressed  (sensor_msgs/CompressedImage)
   /camera3/image_jpeg/compressed  (sensor_msgs/CompressedImage)
+  /camera4/image_jpeg/compressed  (sensor_msgs/CompressedImage) - 차선 인지 전용
   /lidar/points             (sensor_msgs/PointCloud2) - 표준 Velodyne VLP-16 패킷 디코딩,
                             포인트별 정밀시각 기반 모션 왜곡(motion distortion) 보정 포함
   ※ 아래 둘은 팀 원본에 없고 이 작업본에만 있다:
@@ -25,9 +26,11 @@ MORAI와는 UDP로, 우리 컨트롤러/인지 노드들과는 ROS 토픽으로 
 LiDAR: 표준 Velodyne VLP-16 1206바이트 포맷).
 """
 import math
+import queue
 import socket
 import struct
 import threading
+from collections import deque
 import numpy as np
 import rospy
 from morai_msgs.msg import CtrlCmd, EgoVehicleStatus, GPSMessage, CollisionData, ObjectStatus
@@ -47,10 +50,18 @@ CTRL_CMD_PORT = 9093          # MORAI Network Settings의 Host PORT랑 일치해
 #
 # ⚠️ 되돌릴 때: 진단 도구(diag_latency/analyze_latency)는 GT 위치가 있어야 오차를
 #   잴 수 있다. 측정할 때만 9111 로 바꾸고, 제출본은 반드시 9109 여야 한다.
-EGO_INFO_RECV_PORT = 9109
+#
+# 2026-09-03: 상수를 rosparam 으로 뺐다.
+#   손으로 9111 <-> 9109 를 오가면 언젠가 9111 인 채로 제출하게 된다.
+#   기본값을 규정 채널(9109)로 두고, 측정할 때만 넘긴다:
+#       rosrun udp_bridge udp_bridge.py _ego_info_port:=9111
+EGO_INFO_RECV_PORT_DEFAULT = 9109
 GPS_RECV_PORT = 2503
 IMU_RECV_PORT = 2505
-CAMERA_PORTS = {1: 2507, 2: 2509, 3: 2511}
+CAMERA_PORTS = {1: 2507, 2: 2509, 3: 2511, 4: 2513}
+#   4번은 차선 인지가 쓰는 카메라다. 팀 repo 의 yeonsoo 브랜치가
+#   /camera4/image_jpeg/compressed 를 구독하므로 여기서 안 열면 인지가 아무것도 못 받는다.
+#   포트는 MORAI Network Settings 의 카메라4 Host PORT 와 일치해야 한다.
 LIDAR_RECV_PORT = 2501
 # 충돌 감지 (회피 검증 자동화용, 규정 허용 채널). 0 이면 수신 안 함.
 COLLISION_RECV_PORT = 9092
@@ -275,14 +286,42 @@ class Vlp16ReceiverUDP:
     # 패킷당 firing sequence 24개(블록 12 x 시퀀스 2), 시퀀스 간 55.296us, 시퀀스 내 채널 간 2.304us.
     FIRING_SEQ_US = 55.296
     CHANNEL_US = 2.304
+    # 2026-08-19 (팀 woonggook 브랜치): 커널 소켓 drops 카운터(/proc/net/udp)가 0으로
+    # 확인됨 - 패킷이 유실되는 게 아니라 순서가 뒤바뀌어 도착해서 wrap 판정이 헷갈리는
+    # 것으로 확인. 패킷 자체 타임스탬프가 이 값(500ms)보다 작게 과거로 튀면 뒤늦게 도착한
+    # 뒤섞인 패킷으로 보고 통째로 버림 (한 스캔 길이가 ~100ms라 500ms면 순서 뒤바뀜이라기엔
+    # 넉넉하게 큰 값 - 진짜 정시(1시간) 롤오버는 이거보다 훨씬 큰 폭으로 떨어지므로 오탐 안 함).
+    REORDER_DISCARD_THRESHOLD_US = 500000
 
     def __init__(self, ip, port, callback):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # rmem_max(208KB)에 막혀 4MB 요청해도 실제로는 416KB로만 잡히지만, 카메라 소켓과
+        # 동일하게 여유는 조금이라도 늘려둠(핵심 수정은 아래 큐 분리).
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
         self.sock.bind((ip, port))
         self._callback = callback
         self._points = []
         self._prev_azimuth = None
+        self._max_timestamp_us = None
+        self._blocks_since_wrap = 0
+        self._recent_block_counts = deque(maxlen=8)
+        # 모션왜곡 보정(callback = numpy deskew + PointCloud2 publish)이 수신 스레드 안에서
+        # 동기 실행되면, 한 바퀴 끝날 때마다 그 스레드가 recvfrom을 못 부르고 멈춰있게 됨 ->
+        # 그 사이 도착한 패킷이 커널 버퍼 넘쳐서 드롭(실측: 포인트 7253개 -> 최저 2624개까지
+        # 튐, 정지 물체인데도 발생). 별도 스레드+큐로 분리해서 수신 스레드는 파싱만 하고
+        # 항상 즉시 recvfrom으로 복귀하게 함 - 처리가 얼마나 걸리든 수신 루프엔 영향 없음.
+        # 큐가 꽉 차면(처리가 못 따라가는 중) 가장 오래된 스캔을 버리고 최신 걸 우선함.
+        self._scan_queue = queue.Queue(maxsize=3)
         threading.Thread(target=self._loop, daemon=True).start()
+        threading.Thread(target=self._process_loop, daemon=True).start()
+
+    def _process_loop(self):
+        while not rospy.is_shutdown():
+            try:
+                points = self._scan_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            self._callback(points)
 
     def _loop(self):
         while not rospy.is_shutdown():
@@ -297,6 +336,18 @@ class Vlp16ReceiverUDP:
         # 이제 모션 왜곡 보정용 포인트별 정밀 시각 계산에 사용.
         timestamp_us = struct.unpack('<I', data[1200:1204])[0]
 
+        # 이 패킷이 최근에 처리한 것보다 시간상 과거인데 그 폭이 작으면(진짜 정시 롤오버가
+        # 아니면) 네트워크에서 순서가 뒤바뀌어 늦게 도착한 패킷 - 어느 스캔에 속하는지
+        # 애매해서 섞이면 스캔이 깨지니 통째로 버림.
+        if self._max_timestamp_us is not None:
+            behind_us = self._max_timestamp_us - timestamp_us
+            if 0 < behind_us < self.REORDER_DISCARD_THRESHOLD_US:
+                rospy.logwarn_throttle(
+                    5.0, "[Vlp16Receiver] 패킷 순서 뒤바뀜 감지(%.1fms 과거) - 버림",
+                    behind_us / 1000.0)
+                return
+        self._max_timestamp_us = timestamp_us
+
         for b in range(self.NUM_BLOCKS):
             off = b * self.BLOCK_LEN
             flag = struct.unpack('<H', data[off:off + 2])[0]
@@ -308,9 +359,33 @@ class Vlp16ReceiverUDP:
             # 회전 한 바퀴(360도) 완료 감지: 방위각이 크다가 갑자기 확 작아지면 wrap
             if self._prev_azimuth is not None and azimuth_deg < self._prev_azimuth - 300:
                 if self._points:
-                    self._callback(self._points)
+                    # 커널 소켓 drops=0인데도 스캔 크기가 흔들리는 게 확인됨(2026-08-19) ->
+                    # 호스트에 도착하기 전에(가상 네트워크 어딘가) 패킷이 실제로 유실되는
+                    # 것으로 추정 - wrap 판정용 패킷이 유실되면 다음 wrap까지 두 바퀴가
+                    # 합쳐짐. 절대 개수 대신 "최근 스캔들 대비"로 판정해야 장면마다 포인트
+                    # 밀도가 달라도(예: 7264개대 장면 vs 9000개대 장면) 정상 스캔까지
+                    # 걸러지지 않음(고정 임계값을 썼다가 정상 스캔까지 다 버려져서 아무것도
+                    # 발행 안 되는 문제를 실측으로 확인했음).
+                    typical = (sorted(self._recent_block_counts)[len(self._recent_block_counts) // 2]
+                               if len(self._recent_block_counts) >= 4 else None)
+                    if typical is not None and self._blocks_since_wrap > typical * 1.6:
+                        rospy.logwarn_throttle(
+                            2.0, "[Vlp16Receiver] 스캔 병합 의심(블록 %d개, 최근 평소 %d개) - 버림",
+                            self._blocks_since_wrap, typical)
+                    else:
+                        self._recent_block_counts.append(self._blocks_since_wrap)
+                        try:
+                            self._scan_queue.put_nowait(self._points)
+                        except queue.Full:
+                            try:
+                                self._scan_queue.get_nowait()  # 가장 오래된 스캔 버리고
+                            except queue.Empty:
+                                pass
+                            self._scan_queue.put_nowait(self._points)  # 최신 스캔 넣기
                 self._points = []
+                self._blocks_since_wrap = 0
             self._prev_azimuth = azimuth_deg
+            self._blocks_since_wrap += 1
 
             az_rad = math.radians(azimuth_deg)
             # 32개 채널(16채널 x 2 firing sequence) - 두 시퀀스 모두 이 블록의 azimuth를
@@ -433,7 +508,14 @@ class UdpBridge:
 
         rospy.Subscriber('/ctrl_cmd', CtrlCmd, self._on_ctrl_cmd)
 
-        self.info_receiver = EgoInfoReceiverUDP("0.0.0.0", EGO_INFO_RECV_PORT, self._on_ego_info)
+        ego_port = int(rospy.get_param('~ego_info_port', EGO_INFO_RECV_PORT_DEFAULT))
+        if ego_port != EGO_INFO_RECV_PORT_DEFAULT:
+            # 규정 채널이 아닌 값으로 돌고 있다는 것을 크게 남긴다. 이 로그가 보이면
+            # 제출본이 아니다.
+            rospy.logwarn("[udp_bridge] ego_info_port=%d (DIAGNOSTIC). "
+                          "Competition build must use %d.",
+                          ego_port, EGO_INFO_RECV_PORT_DEFAULT)
+        self.info_receiver = EgoInfoReceiverUDP("0.0.0.0", ego_port, self._on_ego_info)
         self.gps_receiver = GpsReceiverUDP("0.0.0.0", GPS_RECV_PORT, self._on_gps)
         self.imu_receiver = ImuReceiverUDP("0.0.0.0", IMU_RECV_PORT, self._on_imu)
         self.cam_receivers = {
@@ -447,7 +529,7 @@ class UdpBridge:
                 "0.0.0.0", COLLISION_RECV_PORT, self._on_collision)
 
         rospy.loginfo("[udp_bridge] started (ego_info:%d gps:%d imu:%d cameras:%s lidar:%d)",
-                      EGO_INFO_RECV_PORT, GPS_RECV_PORT, IMU_RECV_PORT,
+                      ego_port, GPS_RECV_PORT, IMU_RECV_PORT,
                       CAMERA_PORTS, LIDAR_RECV_PORT)
 
     def _on_collision(self, data):

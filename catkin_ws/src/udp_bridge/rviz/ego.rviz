@@ -5,7 +5,7 @@ Panels:
     Property Tree Widget:
       Expanded: ~
       Splitter Ratio: 0.5
-    Tree Height: 648
+    Tree Height: 533
   - Class: rviz/Views
     Expanded:
       - /Current View1
@@ -166,7 +166,7 @@ Visualization Manager:
       Marker Topic: /lattice_candidates
       Name: LatticeCandidates
       Namespaces:
-        {}
+        lattice: true
       Queue Size: 100
       Value: true
     - Alpha: 1
@@ -201,6 +201,18 @@ Visualization Manager:
         objects: true
       Queue Size: 100
       Value: true
+    - Class: rviz/Image
+      Enabled: false
+      Image Topic: /camera1/detections
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Image
+      Normalize Range: true
+      Queue Size: 2
+      Transport Hint: compressed
+      Unreliable: false
+      Value: false
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -217,7 +229,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 30
+      Distance: 77.35061645507812
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -233,9 +245,9 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.699999988079071
+      Pitch: 1.5697963237762451
       Target Frame: base_link
-      Yaw: 3.0999999046325684
+      Yaw: 4.345000267028809
     Saved: ~
 Window Geometry:
   Displays:
@@ -243,9 +255,11 @@ Window Geometry:
   Height: 1728
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000002180000062efc0200000002fb000000100044006900730070006c0061007900730100000069000003760000017800fffffffb0000000a0056006900650077007301000003eb000002ac0000012300ffffff000008640000062e00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Image:
+    collapsed: false
+  QMainWindow State: 000000ff00000000fd0000000100000000000002180000062efc0200000002fb000000100044006900730070006c0061007900730100000069000003030000017800fffffffc000003780000031f0000012300fffffffa000000010100000002fb0000000a0049006d006100670065020000075e000003df000005ca00000473fb0000000a005600690065007700730100000000000002180000014f00ffffff000007e20000062e00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: false
-  Width: 2696
-  X: 232
-  Y: 164
+  Width: 2566
+  X: 139
+  Y: 109
