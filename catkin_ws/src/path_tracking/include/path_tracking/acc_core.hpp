@@ -13,7 +13,20 @@ struct Vec2 { double x = 0.0; double y = 0.0; };
 //
 // radius: 물체의 외접원 반경 [m]. lattice_planner 의 gatherObstacles 와 같은
 //   방식(0.5*max(size.x,size.y))으로 채운다. 기본 0 이면 점으로 취급한다.
-struct ObjIn { Vec2 pos; double speed_mps = 0.0; double radius = 0.0; };
+// 인지가 준 물체 하나.
+//
+// 크기는 두 가지로 줄 수 있다 (호출자가 아는 만큼만 채운다):
+//   length/width/yaw : 방향 있는 상자. 이게 있으면 이쪽을 쓴다 (정확).
+//   radius           : 원 근사. 크기를 모를 때의 보수적 폴백.
+// 왜 상자가 필요한지는 아래 lateralHalfExtent 주석 참고.
+struct ObjIn {
+  Vec2   pos;
+  double speed_mps = 0.0;
+  double radius    = 0.0;   // [m] 폴백용 외접원 반경
+  double length    = 0.0;   // [m] 주축(긴 쪽) 길이. 0 이면 radius 를 쓴다
+  double width     = 0.0;   // [m] 부축 길이
+  double yaw       = 0.0;   // [rad] 물체 방향 (경로와 같은 전역 프레임)
+};
 
 // 선택된 앞차/장애물
 struct Lead {
@@ -56,6 +69,8 @@ struct AccParams {
 struct Projection {
   double s = 0.0;         // 경로 시작부터의 종방향 거리 [m]
   double d = 0.0;         // 경로에서의 횡방향 거리 (부호 없음) [m]
+  double yaw = 0.0;       // [rad] 그 지점 경로의 진행방향. 물체 방향과의 각도차를
+                          //       내는 데 쓴다 (lateralHalfExtent 참고).
   bool   valid = false;
 };
 
@@ -90,11 +105,46 @@ inline Projection projectToPath(const std::vector<Vec2>& path, const Vec2& p) {
       best_d = dist;
       best.s = s_acc + t * seg_len;
       best.d = dist;
+      best.yaw = std::atan2(path[i + 1].y - path[i].y,
+                            path[i + 1].x - path[i].x);
       best.valid = true;
     }
     s_acc += seg_len;
   }
   return best;
+}
+
+// 물체가 "경로에 수직인 방향으로" 실제로 차지하는 반폭 [m].
+//
+// 왜 원 근사로는 안 되는가 (2026-09-03 실측, logs/percobj_percep1.csv)
+//   가드레일 조각은 긴 쪽(3.32m)이 도로 진행방향인데, 원은 그 길이를 옆으로도
+//   부풀린다. r = 0.5*max(3.32, 0.47) = 1.66 이 되어, 경로에서 2.51m 떨어진
+//   물체가 통로 안(2.51 - 1.66 = 0.84 < 0.95)으로 판정됐다. 그 결과 ACC 가
+//   앞차로 잡아 목표속도를 0 으로 내렸고, 차가 경로 627.9m 지점에 멈춰
+//   끝까지 가지 못했다. 실제 폭은 0.47m 라 여유가 1.33m 있었다.
+//
+//   원은 "도로와 나란한 길쭉이" 와 "길을 가로막은 상자" 를 구분하지 못해서
+//   둘 중 한쪽을 반드시 틀린다. 임계값을 조정해도 안 풀린다 - 두 경우가
+//   같은 숫자를 만들기 때문이다. 각도를 쓰면 그 둘이 갈린다:
+//
+//     theta = 물체 방향 - 그 지점 경로 방향
+//     반폭  = |sin theta| * (length/2) + |cos theta| * (width/2)
+//
+//     theta ~ 0  (도로와 나란)  -> 반폭 = width/2   -> 안 막는다 (가드레일)
+//     theta ~ 90 (길을 가로막음) -> 반폭 = length/2  -> 막는다   (회피는 살아있다)
+//
+// |sin|·|cos| 이라 180도 주기가 저절로 처리된다 (앞뒤 구분이 없는 값이라 맞다).
+inline double lateralHalfExtent(double length, double width, double theta_rad) {
+  return std::fabs(std::sin(theta_rad)) * 0.5 * length +
+         std::fabs(std::cos(theta_rad)) * 0.5 * width;
+}
+
+// 물체 하나의 횡 반폭. 크기를 모르면(length/width 가 0) radius 로 폴백한다.
+//   ⚠️ lattice_planner.cpp 도 이 함수를 쓴다. 두 모듈이 같은 물체를 다르게
+//      판정하면 2026-09-02 같은 일이 생긴다(lattice 는 통과시키는데 ACC 만 정지).
+inline double halfExtentOf(const ObjIn& o, double path_yaw) {
+  if (o.length <= 0.0 && o.width <= 0.0) return o.radius;
+  return lateralHalfExtent(o.length, o.width, o.yaw - path_yaw);
 }
 
 // km/h 속도벡터 → m/s 스칼라 (단위 함정 처리)
@@ -134,7 +184,7 @@ inline Lead selectLead(const std::vector<Vec2>& path, const Vec2& ego,
     //
     // ⚠️ 호출자가 radius 를 안 채우면 점으로 취급된다. 그러면 차선 안에서 조금
     //    치우친 진짜 앞차를 놓칠 수 있다. acc_planner 는 반드시 크기를 넘길 것.
-    if (op.d - o.radius >= p.car_half_width) continue;   // 통로 밖
+    if (op.d - halfExtentOf(o, op.yaw) >= p.car_half_width) continue;   // 통로 밖
 
 
     double gap = op.s - ego_proj.s;                  // 종방향 gap (부호 있음)

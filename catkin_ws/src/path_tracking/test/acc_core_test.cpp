@@ -311,6 +311,103 @@ TEST(SelectLead, WideObjectReachingIntoCorridorSelected) {
   EXPECT_TRUE(lead.present);
 }
 
+// ⚠️ 실측 재현 (2026-09-03, logs/percobj_percep1.csv): 가드레일 조각이 차를 세웠다.
+//
+// 경로 627.9m 지점에서 자차가 멈춰 끝까지 못 갔다. 그때 인지가 보고한 물체:
+//   uid=3  npc(type=1)  자차 앞 9.24m  경로 왼쪽 2.51m  크기 3.32 x 0.47m  속도 ~0
+// 중앙분리대 가드레일 조각인데 YOLO 가 차로 오분류해 npc_list 로 들어왔다.
+//
+// 원 근사가 길이를 옆으로 부풀린다:
+//   r = 0.5*max(3.32, 0.47) = 1.66     <- 긴 쪽은 "도로 진행방향" 인데 옆으로도 부풀림
+//   2.51 - 1.66 = 0.85 < 0.95(차 반폭) -> 통로 안으로 오판 -> 앞차 -> 목표속도 0
+//
+// 실제로는 폭이 0.47m 라 가장자리까지 2.51 - 0.235 = 2.28m, 차 반폭과 1.33m 여유가 있다.
+// 이 테스트는 지금 코드에서 실패한다 - 원 근사를 쓰는 한 통과할 수 없다.
+TEST(SelectLead, GuardrailSegmentAlongRoadIgnored) {
+  AccParams p = defaultParams();
+  std::vector<Vec2> path = straightPath();
+  Vec2 ego{0.0, 0.0};
+  ObjIn rail;
+  rail.pos = {9.24, 2.51};
+  rail.speed_mps = 0.0;
+  rail.length = 3.32;      // 긴 쪽이 도로 진행방향
+  rail.width  = 0.47;
+  rail.yaw    = 0.0;       // straightPath 는 +x 방향이라 theta = 3.3도 -> 0 으로 근사
+  Lead lead = selectLead(path, ego, {rail}, p);
+  EXPECT_FALSE(lead.present);
+}
+
+// 반대 경우: 길을 가로막은 상자는 여전히 잡아야 한다. 회피 기능이 죽으면 안 된다.
+// 같은 3.32 x 0.47 물체가 도로에 수직(theta=90도)이면 횡반폭이 length/2 = 1.66 이
+// 되어 2.51 - 1.66 = 0.85 < 0.95 -> 앞차로 잡힌다.
+TEST(SelectLead, BoxAcrossRoadStillSelected) {
+  AccParams p = defaultParams();
+  std::vector<Vec2> path = straightPath();
+  Vec2 ego{0.0, 0.0};
+  ObjIn box;
+  box.pos = {9.24, 2.51};
+  box.speed_mps = 0.0;
+  box.length = 3.32;
+  box.width  = 0.47;
+  box.yaw    = M_PI / 2.0;   // 도로에 수직
+  Lead lead = selectLead(path, ego, {box}, p);
+  EXPECT_TRUE(lead.present);
+}
+
+// 크기를 안 주면 예전처럼 원으로 본다 (인지가 size 를 안 채우는 경우 대비).
+TEST(SelectLead, NoSizeFallsBackToCircle) {
+  AccParams p = defaultParams();
+  std::vector<Vec2> path = straightPath();
+  Vec2 ego{0.0, 0.0};
+  ObjIn o;
+  o.pos = {9.24, 2.51};
+  o.speed_mps = 0.0;
+  o.radius = 1.66;           // length/width 는 0 -> radius 로 폴백
+  Lead lead = selectLead(path, ego, {o}, p);
+  EXPECT_TRUE(lead.present);
+}
+
+// --- lateralHalfExtent 순수 함수 ---
+
+TEST(LateralHalfExtent, ParallelUsesWidth) {
+  EXPECT_NEAR(lateralHalfExtent(3.32, 0.47, 0.0), 0.235, 1e-6);
+}
+
+TEST(LateralHalfExtent, PerpendicularUsesLength) {
+  EXPECT_NEAR(lateralHalfExtent(3.32, 0.47, M_PI / 2.0), 1.66, 1e-6);
+}
+
+// 실측값 그대로: theta 3.3도 -> 0.33m (원 근사 1.66m 의 5분의 1)
+TEST(LateralHalfExtent, MeasuredGuardrailCase) {
+  EXPECT_NEAR(lateralHalfExtent(3.32, 0.47, 3.3 * M_PI / 180.0), 0.3308, 1e-3);
+}
+
+// 180도 주기 - 앞뒤를 뒤집어도 같은 값이어야 한다
+TEST(LateralHalfExtent, PeriodicInPi) {
+  EXPECT_NEAR(lateralHalfExtent(3.32, 0.47, 0.4),
+              lateralHalfExtent(3.32, 0.47, 0.4 + M_PI), 1e-9);
+}
+
+// 어떤 각도에서도 상자의 반대각선을 넘지 않는다.
+//
+// ⚠️ 여기서 한 가지 주의: 예전 원 근사 반경 0.5*max(L,W) 를 "상한" 으로 생각하면
+//    틀린다. 그 원은 상자를 다 담지 못한다(반대각선 sqrt(L^2+W^2)/2 가 더 크다).
+//    3.32 x 0.47 이면 원 1.660 vs 반대각선 1.677 이라, theta 82도 부근에서
+//    새 판정이 예전보다 1.7cm 더 크게 나온다. 즉 이 변경은 "무조건 느슨해지는"
+//    게 아니라, 나란한 쪽은 크게 느슨해지고 가로막은 쪽은 살짝 엄격해진다.
+//    회피가 필요한 상황을 놓치지 않는다는 뜻이라 안전한 방향이다.
+TEST(LateralHalfExtent, NeverExceedsHalfDiagonal) {
+  const double L = 3.32, W = 0.47;
+  const double half_diag = 0.5 * std::hypot(L, W);
+  double worst = 0.0;
+  for (int deg = 0; deg <= 180; ++deg) {
+    double h = lateralHalfExtent(L, W, deg * M_PI / 180.0);
+    EXPECT_LE(h, half_diag + 1e-9) << "deg=" << deg;
+    worst = std::max(worst, h);
+  }
+  EXPECT_NEAR(worst, half_diag, 1e-3);   // 최댓값이 실제로 반대각선이다
+}
+
 // 두 객체 → 더 가까운 것 선택
 TEST(SelectLead, NearestChosen) {
   AccParams p = defaultParams();

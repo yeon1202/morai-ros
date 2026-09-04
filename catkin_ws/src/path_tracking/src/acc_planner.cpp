@@ -126,20 +126,31 @@ private:
 
   // npc_list + obstacle_list → ObjIn (속도 km/h → m/s). 보행자는 제외(behavior FSM 몫).
   //
-  // radius 는 lattice_planner 의 gatherObstacles 와 "같은 식" 이어야 한다.
+  // 크기 표현은 lattice_planner 의 gatherObstacles 와 "같은 식" 이어야 한다.
   // 두 모듈이 같은 물체를 다르게 판정하면 2026-09-02 같은 일이 생긴다 - lattice 는
   // 통과시키는 도로변 가로등을 ACC 만 앞차로 잡아 차가 길 한복판에 섰다.
   //   ⚠️ 여기를 고치면 lattice_planner.cpp 의 gatherObstacles 도 같이 봐야 한다.
+  //
+  // 2026-09-03: 원 근사(0.5*max(x,y)) 를 방향 있는 상자로 바꿨다. 원은 가드레일의
+  // 길이를 옆으로 부풀려 경로 밖 2.51m 물체를 앞차로 잡았고 차가 멈췄다.
+  // 자세한 이유는 acc_core.hpp 의 lateralHalfExtent 주석 참고.
   std::vector<acc::ObjIn> gatherObjects()
   {
     std::vector<acc::ObjIn> v;
     auto add = [&](const std::vector<morai_msgs::ObjectStatus>& list) {
       for (const auto& o : list) {
+        acc::ObjIn in;
+        in.pos       = { o.position.x, o.position.y };
+        in.speed_mps = acc::speedKmhToMps(o.velocity.x, o.velocity.y);
+        // size 규약: x=length(주축), y=width(부축). heading 은 도 단위.
+        in.length    = o.size.x;
+        in.width     = o.size.y;
+        in.yaw       = o.heading * M_PI / 180.0;
+        // 인지가 크기를 아주 작게(또는 0으로) 주는 경우 대비. 상자 쪽이 비어 있으면
+        // acc_core 가 radius 로 폴백한다.
         double r = 0.5 * std::max(o.size.x, o.size.y);
-        if (r < 0.3) r = 0.3;                       // 인지가 아주 작게 주는 경우 대비
-        v.push_back({ {o.position.x, o.position.y},
-                      acc::speedKmhToMps(o.velocity.x, o.velocity.y),
-                      r });
+        in.radius  = (r < 0.3) ? 0.3 : r;
+        v.push_back(in);
       }
     };
     add(objs_.npc_list);
