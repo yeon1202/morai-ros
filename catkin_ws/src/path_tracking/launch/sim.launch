@@ -8,8 +8,47 @@
   <!-- 차량 시각화 (차 박스 + TF) -->
   <node pkg="udp_bridge" type="ego_viz.py" name="ego_viz" output="screen"/>
 
-  <!-- 경로 추종 (path_smooth.csv -> /ctrl_cmd) -->
-  <node pkg="path_tracking" type="path_tracker.py" name="path_tracker" output="screen"/>
+  <!-- 제어기 선택 (2026-09-03)
+
+       controller:=internal (기본)
+         path_tracker.py 가 경로 공급과 제어를 둘 다 한다. 지금까지의 동작.
+
+       controller:=external
+         팀 vehicle_control 이 제어를 맡는다. path_tracker 의 /ctrl_cmd 는
+         /ctrl_cmd_path_tracker 로 돌려 아무도 안 듣게 한다.
+
+       ⚠️ path_tracker 를 "끄면" 안 된다. 이 노드는 제어기이기 전에 경로 공급원이다
+          (/local_path -> lattice_planner). 끄면 회피가 통째로 멈춘다.
+          그래서 노드는 살리고 /ctrl_cmd 만 돌린다.
+
+       ⚠️ 둘 다 /ctrl_cmd 를 내면 서로 덮어쓰는데 양쪽 로그는 정상으로 보인다.
+          그래서 스위치 하나로 묶어 동시에 뜰 수 없게 했다. -->
+  <arg name="controller" default="internal"/>
+  <arg name="waypoint_csv"
+       default="$(find autonomous_driving)/path/path_smooth_closed.csv"/>
+  <arg name="max_speed_kph" default="40.0"/>
+  <arg name="control_log"   default="$(env HOME)/catkin_ws/logs/vehicle_control.csv"/>
+
+  <!-- 경로 공급 + (internal 일 때) 제어 -->
+  <node if="$(eval arg('controller') == 'internal')"
+        pkg="path_tracking" type="path_tracker.py" name="path_tracker" output="screen"/>
+
+  <node unless="$(eval arg('controller') == 'internal')"
+        pkg="path_tracking" type="path_tracker.py" name="path_tracker" output="screen">
+    <!-- 제어 출력만 죽인다. /global_path /local_path 는 그대로 나간다.
+         버리지 않고 남겨두는 이유: 두 제어기의 명령을 나란히 비교할 수 있다. -->
+    <remap from="/ctrl_cmd" to="/ctrl_cmd_path_tracker"/>
+  </node>
+
+  <!-- external 일 때만 뜨는 팀 제어기 -->
+  <node if="$(eval arg('controller') == 'external')"
+        pkg="autonomous_driving" type="vehicle_control" name="vehicle_control" output="screen">
+    <!-- 팀 기본값이 /root/catkin_ws/... 라 우리 환경에서는 반드시 넘겨야 한다.
+         안 넘기면 ROS_FATAL 로 바로 죽는다. -->
+    <param name="waypoint_csv"   value="$(arg waypoint_csv)"/>
+    <param name="log_csv_path"   value="$(arg control_log)"/>
+    <param name="max_speed_kph"  value="$(arg max_speed_kph)"/>
+  </node>
 
   <!-- 장애물 공급원 전환 (2026-08-27 추가. docs/24-perception_integration_design.md)
 
@@ -26,12 +65,16 @@
            ekf_localization_node 가 낸다. 둘 다 없으면 인지가 조용히 멈춘다. -->
   <arg name="perception" default="false"/>
   <arg name="camera"     default="true"/>   <!-- perception:=true 일 때만 의미 있음 -->
+  <!-- 카메라 영상 위에 라이다 투영을 겹쳐 그린다. 인지가 물체를 "어디에" 놓는지
+       눈으로 확인할 때 쓴다 (2026-09-03: 앞차가 횡으로 2.5m 밀려 잡히는지 확인용). -->
+  <arg name="calib_check" default="false"/>
 
   <node unless="$(arg perception)" pkg="path_tracking" type="mock_obstacle_pub"
         name="mock_obstacle_pub" output="screen"/>
 
   <include if="$(arg perception)" file="$(find autonomous_driving)/launch/perception.launch">
     <arg name="camera" value="$(arg camera)"/>
+    <arg name="enable_calibration_check" value="$(arg calib_check)"/>
   </include>
   <node if="$(arg perception)" pkg="path_tracking" type="object_topic_adapter.py"
         name="object_topic_adapter" output="screen"/>
